@@ -12,6 +12,9 @@
  * defaults to the upper-cased name. The file name `.env.example` (its
  * content is renamed), LICENSE, .git, node_modules and dist are left alone.
  *
+ * `<npm-package>` becomes `mcp-server-<name>`. Every target path is checked
+ * before anything is written.
+ *
  * Template-only parts are removed: blocks between `template:start` and
  * `template:end` markers (README.md, .github/workflows/ci.yml) and this
  * script itself. The remaining checklist is in docs/NEW-SERVER.md.
@@ -65,6 +68,8 @@ const TEMPLATE_BLOCKS = [
 ];
 
 const REPLACEMENTS = { EXAMPLE: prefix, Example: title, example: name };
+/** Stands for the npm package name in README commands until the rename sets it. */
+const PACKAGE_TOKEN = '<npm-package>';
 
 /** One pass, so a new name that contains the placeholder is not substituted twice. */
 function replaceAll(text) {
@@ -94,8 +99,9 @@ function isText(buffer) {
 }
 
 const { files, dirs } = walk(root);
-let changed = 0;
 
+// Plan everything first; nothing is written unless every step can be done.
+const edits = [];
 for (const file of files) {
   const buffer = readFileSync(file);
   if (!isText(buffer)) {
@@ -106,30 +112,41 @@ for (const file of files) {
   for (const block of TEMPLATE_BLOCKS) {
     updated = updated.replace(block, '\n');
   }
-  updated = replaceAll(updated);
+  updated = replaceAll(updated).split(PACKAGE_TOKEN).join(`mcp-server-${name}`);
   if (updated !== original) {
-    changed += 1;
-    console.log(`edit   ${relative(root, file)}`);
-    if (!dryRun) {
-      writeFileSync(file, updated);
-    }
+    edits.push({ file, updated });
   }
 }
 
-// Rename files, then directories, deepest first so parent paths stay valid.
+// Files, then directories, deepest first so parent paths stay valid. Each
+// target is checked against the original tree, which is where it lands.
 const renames = [...files, ...dirs]
   .filter(path => basename(path).includes('example') && basename(path) !== PROTECTED)
-  .sort((a, b) => b.length - a.length);
-for (const path of renames) {
-  const target = join(dirname(path), replaceAll(basename(path)));
+  .sort((a, b) => b.length - a.length)
+  .map(path => ({ path, target: join(dirname(path), replaceAll(basename(path))) }));
+const conflicts = renames.filter(
+  ({ target }, index) => existsSync(target) || renames.findIndex(other => other.target === target) !== index,
+);
+if (conflicts.length > 0) {
+  fail(
+    `Refusing to rename: ${conflicts.map(({ target }) => relative(root, target)).join(', ')} already exist(s) ` +
+      'or would be created twice. Nothing changed.',
+  );
+}
+
+for (const { file, updated } of edits) {
+  console.log(`edit   ${relative(root, file)}`);
+  if (!dryRun) {
+    writeFileSync(file, updated);
+  }
+}
+for (const { path, target } of renames) {
   console.log(`rename ${relative(root, path)} -> ${relative(root, target)}`);
   if (!dryRun) {
-    if (existsSync(target)) {
-      fail(`Refusing to overwrite ${relative(root, target)}.`);
-    }
     renameSync(path, target);
   }
 }
+const changed = edits.length;
 
 console.log(`delete ${relative(root, self)}`);
 if (!dryRun) {

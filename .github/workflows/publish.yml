@@ -23,7 +23,7 @@ jobs:
     uses: ./.github/workflows/ci.yml
 
   # Nothing is published from the template repository, or while the
-  # placeholder server is still present (scripts/rename.mjs exists).
+  # placeholder server is still present (see .github/scripts/placeholder-ready.sh).
   guard:
     if: github.repository != 'borgels/mcp-server-template'
     runs-on: ubuntu-latest
@@ -35,12 +35,11 @@ jobs:
           persist-credentials: false
       - id: check
         run: |
-          if [ -e scripts/rename.mjs ]; then
-            echo "::warning::scripts/rename.mjs exists: the placeholder server has not been renamed; no image is published."
-            echo "ready=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "ready=true" >> "$GITHUB_OUTPUT"
+          result="$(sh .github/scripts/placeholder-ready.sh)"
+          if [ "$result" != "ready=true" ]; then
+            echo "::warning::The placeholder server has not been renamed; no image is published."
           fi
+          echo "$result" >> "$GITHUB_OUTPUT"
 
   publish:
     needs: [test, guard]

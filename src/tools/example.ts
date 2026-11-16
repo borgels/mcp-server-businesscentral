@@ -85,9 +85,19 @@ export function findTool(name: string): ToolDefinition | undefined {
   return EXAMPLE_TOOLS.find(tool => tool.name === name);
 }
 
-/** Validate the tool policy and audit environment; call once at startup. */
+/** Validate the tool policy environment. Cheap; runs for every server instance. */
 export function validateToolConfig(): void {
   validatePolicyConfig(EXAMPLE_TOOLS.map(tool => tool.name));
+}
+
+/**
+ * Startup checks for entry points (transports, gateway): tool policy plus a
+ * writable audit log. The audit check is not repeated per HTTP request, so
+ * read tools keep working if the log becomes unwritable later; write tools
+ * then fail closed when their start record cannot be written.
+ */
+export function validateStartupConfig(): void {
+  validateToolConfig();
   assertAuditLogWritable();
 }
 

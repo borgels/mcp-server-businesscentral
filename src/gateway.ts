@@ -8,7 +8,7 @@ import {
   EXAMPLE_TOOLS,
   executeTool,
   findTool,
-  validateToolConfig,
+  validateStartupConfig,
   type CallContext,
   type ToolDefinition,
 } from './tools/example.js';
@@ -75,7 +75,7 @@ export const exampleGatewayTools: GatewayToolDefinition[] = EXAMPLE_TOOLS.map(to
 }));
 
 export function createExampleGateway(options: ExampleGatewayOptions = {}) {
-  validateToolConfig();
+  validateStartupConfig();
   const client = new ExampleClient(options);
 
   return {

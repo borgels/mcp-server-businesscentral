@@ -27,7 +27,7 @@ This repository is a GitHub template for TypeScript MCP servers: a minimal worki
 Requires Node.js 22 or later and an API key for the Example API.
 
 ```bash
-npx mcp-server-example
+npx <npm-package>
 ```
 
 Or build from source:
@@ -44,7 +44,7 @@ Claude Code:
 ```bash
 claude mcp add example \
   --env EXAMPLE_API_KEY=<key> --env EXAMPLE_BASE_URL=<base url> \
-  -- npx -y mcp-server-example
+  -- npx -y <npm-package>
 ```
 
 Claude Desktop (`claude_desktop_config.json`), or any client that launches stdio servers:
@@ -54,7 +54,7 @@ Claude Desktop (`claude_desktop_config.json`), or any client that launches stdio
   "mcpServers": {
     "example": {
       "command": "npx",
-      "args": ["-y", "mcp-server-example"],
+      "args": ["-y", "<npm-package>"],
       "env": {
         "EXAMPLE_API_KEY": "<key>",
         "EXAMPLE_BASE_URL": "<base url>"
@@ -157,7 +157,7 @@ Project layout:
 
 1. Bump the version in `package.json`, `server.json` (`version` and the npm package `version`) and `src/version.ts`; tests and CI check that they agree. Update `CHANGELOG.md`. Merge.
 2. Tag the merged commit and push the tag: `git tag vX.Y.Z && git push origin vX.Y.Z`.
-3. `release.yml` tests, packs and publishes the tarball to npm with provenance (trusted publishing, no stored token), then publishes `server.json` to the MCP Registry. Versions already on npm or in the registry are skipped, so a failed run can be re-run. Pre-release tags (`vX.Y.Z-rc.1`) go to the npm dist-tag `next` and not to the registry. `publish.yml` pushes the `vX.Y.Z` image.
+3. `release.yml` tests, packs and publishes the tarball to npm through trusted publishing (no stored token; npm adds provenance when the repository is public), then publishes `server.json` to the MCP Registry. Versions already on npm or in the registry are skipped, so a failed run can be re-run. Pre-release tags (`vX.Y.Z-rc.1`) go to the npm dist-tag `next` and not to the registry. `publish.yml` pushes the `vX.Y.Z` image.
 
 The first version of a new package is published by hand; see the header of `.github/workflows/release.yml` (and [docs/NEW-SERVER.md](docs/NEW-SERVER.md)).
 

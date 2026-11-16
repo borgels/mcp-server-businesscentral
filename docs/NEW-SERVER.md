@@ -7,12 +7,13 @@ Steps for turning a repository generated from the MCP server template into a pub
 Run once, right after creating the repository:
 
 ```bash
-npm ci
 node scripts/rename.mjs <name> [<PREFIX>]
 npm ci && npm run typecheck && npm test && npm run build
 ```
 
-The script renames the placeholder in all files and paths, removes the template-only README block and CI job, and deletes itself. Nothing is published (GHCR image, npm, MCP Registry) while `scripts/rename.mjs` exists, so pushes before the rename are safe.
+The script has no dependencies. It checks every target path first, then renames the placeholder in all files and paths, sets the npm package name in the README commands to `mcp-server-<name>`, removes the template-only README block and CI job, and deletes itself. Nothing is published (GHCR image, npm, MCP Registry) while `scripts/rename.mjs` exists or the package is still named after the placeholder, so pushes before the rename are safe.
+
+Check that `mcp-server-<name>` is free on npm (`npm view mcp-server-<name>` should report 404). Otherwise choose another package name and change it everywhere it appears: `name` and the `bin` key in `package.json`, `package-lock.json` (run `npm install` to update it), `server.json` (`packages[].identifier`), `src/version.ts` (User-Agent) and the README commands.
 
 ## 2. Metadata the script cannot know
 
@@ -42,7 +43,7 @@ The first push to `main` after the rename publishes `ghcr.io/<owner>/<repo>`. A 
 npm cannot configure a trusted publisher for a package that does not exist yet.
 
 1. Set the version (`package.json`, `server.json` twice, `src/version.ts`; tests and CI check that they agree) and `CHANGELOG.md`, and merge.
-2. Publish that version by hand from a clean checkout of the merged commit: `npm login`, `npm ci`, `npm publish --access public`.
+2. Publish that version by hand from a clean checkout of the merged commit: `npm login`, `npm ci`, `npm publish --access public`. Make the repository public before releases from the workflow if the package should carry npm provenance (npm only attaches it for public repositories).
 3. Tag the same commit and push the tag (`git tag vX.Y.Z && git push origin vX.Y.Z`). `release.yml` sees the version on npm, skips npm, and publishes `server.json` to the MCP Registry; `publish.yml` pushes the `vX.Y.Z` image.
 4. Shortly before the next release, configure trusted publishing (npm 11.15 or later, account 2FA):
 

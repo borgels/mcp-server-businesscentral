@@ -5,8 +5,8 @@ import { Ajv } from 'ajv';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { UpstreamClient } from '../src/example/client.js';
 import { createServer, getDefaultClient } from '../src/server.js';
-import { exampleGatewayTools } from '../src/gateway.js';
-import { EXAMPLE_TOOLS, executeTool } from '../src/tools/example.js';
+import { createExampleGateway, exampleGatewayTools } from '../src/gateway.js';
+import { EXAMPLE_TOOLS, executeTool, validateStartupConfig } from '../src/tools/example.js';
 import { BASE, auditLines, connect, gateway, makeClient, texts } from './helpers.js';
 
 const originalEnv = { ...process.env };
@@ -87,9 +87,15 @@ describe('MCP tool surface', () => {
     expect((lines[0]?.target as Record<string, unknown>).nameSha256).toMatch(/^[0-9a-f]{64}$/);
   });
 
-  it('refuses an unwritable audit log path at startup', () => {
+  it('refuses an unwritable audit log path at startup, but not per server instance', async () => {
     process.env.EXAMPLE_AUDIT_LOG = join(dir, 'missing-dir', 'audit.jsonl');
-    expect(() => createServer({ clientOptions: { apiKey: 'k' } })).toThrow('EXAMPLE_AUDIT_LOG');
+    expect(() => validateStartupConfig()).toThrow('EXAMPLE_AUDIT_LOG');
+    expect(() => createExampleGateway({ apiKey: 'k' })).toThrow('EXAMPLE_AUDIT_LOG');
+
+    // The HTTP transport creates a server per request: read tools keep working.
+    const { mcpClient } = await connect({ [`GET ${BASE}/items/i1`]: { body: item } });
+    const result = await mcpClient.callTool({ name: 'example_get_item', arguments: { itemId: 'i1' } });
+    expect(result.isError).toBeFalsy();
   });
 
   it('fails closed when the audit log cannot be written before a write', async () => {
@@ -140,14 +146,24 @@ describe('write gate beyond annotations', () => {
   });
 
   it('redacts error text centrally on the MCP path', async () => {
-    const { mcpClient } = await connect({
-      [`GET ${BASE}/items/i1`]: { status: 400, raw: 'echo test-api-key and X-API-Key: other-secret' },
-    });
-    const result = await mcpClient.callTool({ name: 'example_get_item', arguments: { itemId: 'i1' } });
-    expect(result.isError).toBe(true);
-    const text = texts(result).join(' ');
-    expect(text).not.toContain('test-api-key');
-    expect(text).not.toContain('other-secret');
+    // A handler that throws a raw, unredacted error.
+    const tool = EXAMPLE_TOOLS.find(t => t.name === 'example_get_item')!;
+    const original = tool.handler;
+    tool.handler = async () => {
+      throw new Error('failed: key test-api-key, header X-API-Key: other-secret, {"apiKey":"third-secret"}');
+    };
+    try {
+      const { mcpClient } = await connect();
+      const result = await mcpClient.callTool({ name: 'example_get_item', arguments: { itemId: 'i1' } });
+      expect(result.isError).toBe(true);
+      const text = texts(result).join(' ');
+      expect(text).toContain('[REDACTED]');
+      for (const secret of ['test-api-key', 'other-secret', 'third-secret']) {
+        expect(text).not.toContain(secret);
+      }
+    } finally {
+      tool.handler = original;
+    }
   });
 });
 

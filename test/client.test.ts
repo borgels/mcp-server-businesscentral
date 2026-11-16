@@ -198,6 +198,22 @@ describe('error handling', () => {
     registerSecretHeader('X-Vendor-Token');
     expect(redactSecrets('sent x-vendor-token: abc123, ok')).toBe('sent x-vendor-token: [REDACTED], ok');
     expect(redactSecrets(`${API_KEY_HEADER}: abc123`)).not.toContain('abc123');
+    for (const text of [
+      '{"X-Vendor-Token":"abc123"}',
+      "{'x-vendor-token': 'abc123'}",
+      'x-vendor-token=abc123',
+      `{"${API_KEY_HEADER}": "abc123"}`,
+      '{"authorization":"Bearer abc123"}',
+      'authorization=abc123',
+      'x-api-key=abc123:def',
+      'X-Vendor-Token=abc123=def',
+      'authorization=abc123:pass',
+      'Authorization: Basic abc123',
+      'Authorization: Token abc123',
+      '"Authorization": "Digest abc123"',
+    ]) {
+      expect(redactSecrets(text), text).not.toContain('abc123');
+    }
   });
 
   it('keeps query strings out of error URLs', async () => {

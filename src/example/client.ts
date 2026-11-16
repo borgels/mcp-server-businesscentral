@@ -77,15 +77,6 @@ const TRANSIENT_NETWORK_CODES = new Set([
 ]);
 
 /**
- * Client for the upstream API. Authenticates with a single API key header.
- *
- * Redirects are never followed, so the key cannot be forwarded to another
- * origin. Idempotent GETs are retried with backoff on throttling, gateway
- * errors and transient network failures; other methods are never retried.
- * A missing API key or base URL only fails when a request is made, so the
- * tool list can be read without credentials.
- */
-/**
  * The client as handed to tool handlers. Read-only tools get a view whose
  * non-GET methods throw (see readOnlyClient), so the write gate does not
  * depend on tool annotations alone.
@@ -112,6 +103,15 @@ export function readOnlyClient(client: UpstreamClient, toolName: string): Upstre
   };
 }
 
+/**
+ * Client for the upstream API. Authenticates with a single API key header.
+ *
+ * Redirects are never followed, so the key cannot be forwarded to another
+ * origin. Idempotent GETs are retried with backoff on throttling, gateway
+ * errors and transient network failures; other methods are never retried.
+ * A missing API key or base URL only fails when a request is made, so the
+ * tool list can be read without credentials.
+ */
 export class ExampleClient implements UpstreamClient {
   private readonly apiKey?: string;
   readonly baseUrl?: string;

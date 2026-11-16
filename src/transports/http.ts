@@ -1,5 +1,5 @@
 import { ConfigError } from '../config-env.js';
-import { validateToolConfig } from '../tools/example.js';
+import { validateStartupConfig } from '../tools/example.js';
 import { getDefaultClient } from '../server.js';
 import { configWarnings, getHttpConfig, type HttpConfig } from './http-helpers.js';
 import { startHttpServer } from './http-server.js';
@@ -20,7 +20,7 @@ async function main(): Promise<void> {
     // Validate the upstream client and policy configuration once at startup
     // instead of on every request.
     getDefaultClient();
-    validateToolConfig();
+    validateStartupConfig();
   } catch (error) {
     console.error(`Example MCP HTTP server not started: ${error instanceof Error ? error.message : String(error)}`);
     process.exit(1);

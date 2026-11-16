@@ -5,7 +5,9 @@ name: Release
 # job's GitHub OIDC token; no secrets are stored.
 #
 # - npm: trusted publishing for this repository and this workflow file
-#   (release.yml), allowing `npm publish`. Provenance is attached.
+#   (release.yml), allowing `npm publish`. npm attaches provenance
+#   automatically when the repository is public; for a private repository the
+#   package is published without it.
 # - MCP Registry: `mcp-publisher login github-oidc` grants the namespace of
 #   the repository owner (io.github.<owner>/*). server.json is validated by
 #   ci.yml before anything is published.
@@ -28,7 +30,7 @@ name: Release
 #      days.
 #
 # Nothing is published from the template repository, or while the
-# placeholder server is still present (scripts/rename.mjs exists).
+# placeholder server is still present (see .github/scripts/placeholder-ready.sh).
 
 on:
   push:
@@ -49,12 +51,11 @@ jobs:
           persist-credentials: false
       - id: check
         run: |
-          if [ -e scripts/rename.mjs ]; then
-            echo "::warning::scripts/rename.mjs exists: the placeholder server has not been renamed; nothing is published."
-            echo "ready=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "ready=true" >> "$GITHUB_OUTPUT"
+          result="$(sh .github/scripts/placeholder-ready.sh)"
+          if [ "$result" != "ready=true" ]; then
+            echo "::warning::The placeholder server has not been renamed; nothing is published."
           fi
+          echo "$result" >> "$GITHUB_OUTPUT"
 
   test:
     needs: guard
@@ -168,7 +169,7 @@ jobs:
             tag_args=(--tag next)
           fi
           npx --yes "npm@${NPM_VERSION}" publish "${tarballs[0]}" \
-            --provenance --access public --ignore-scripts "${tag_args[@]}"
+            --access public --ignore-scripts "${tag_args[@]}"
 
       # The registry reads mcpName from the published npm package.
       - name: Publish to the MCP Registry

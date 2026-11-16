@@ -15,15 +15,16 @@ export const MAX_ERROR_TEXT = 500;
 const MIN_SECRET_LENGTH = 8;
 
 const SECRET_PATTERNS: RegExp[] = [
-  /x-api-key:\s*[^,\s}]+/gi,
-  /authorization:\s*(bearer\s+)?[^,\s}]+/gi,
+  /["']?x-api-key["']?\s*[:=]\s*["']?[^"',\s}]+/gi,
+  // Any scheme word (Bearer, Basic, Token, ...) followed by the credentials.
+  /["']?authorization["']?\s*[:=]\s*["']?(?:[a-z][\w-]*\s+)?[^"',\s}]+/gi,
   /(apiKey|EXAMPLE_API_KEY|api_key|access_token)["']?\s*[:=]\s*["']?[^"',\s}]+/gi,
 ];
 
-/** Redact `<name>: <value>` for this header name (case-insensitive) in error text. */
+/** Redact `<name>: <value>`, `<name>=<value>` and `"<name>": "<value>"` for this header (case-insensitive). */
 export function registerSecretHeader(name: string): void {
   const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const pattern = new RegExp(String.raw`${escaped}:\s*[^,\s}]+`, 'gi');
+  const pattern = new RegExp(String.raw`["']?${escaped}["']?\s*[:=]\s*["']?[^"',\s}]+`, 'gi');
   if (!SECRET_PATTERNS.some(existing => existing.source === pattern.source)) {
     SECRET_PATTERNS.push(pattern);
   }
@@ -90,9 +91,9 @@ export function redactSecrets(value: string): string {
   return SECRET_PATTERNS.reduce(
     (current, pattern) =>
       current.replace(pattern, match => {
-        const separator = match.includes(':') ? ':' : '=';
-        const key = match.split(separator)[0]?.trim() ?? 'secret';
-        return `${key}${separator} [REDACTED]`;
+        // Split at the first separator only: the value may itself contain `:` or `=`.
+        const [, key = 'secret', separator = ':'] = /^(.*?)\s*([:=])/.exec(match) ?? [];
+        return `${key.trim()}${separator} [REDACTED]`;
       }),
     result,
   );
