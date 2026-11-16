@@ -14,11 +14,20 @@ export const MAX_ERROR_TEXT = 500;
 /** Configured secrets shorter than this are not redacted by value (too likely to hit normal text). */
 const MIN_SECRET_LENGTH = 8;
 
-const SECRET_PATTERNS = [
+const SECRET_PATTERNS: RegExp[] = [
   /x-api-key:\s*[^,\s}]+/gi,
   /authorization:\s*(bearer\s+)?[^,\s}]+/gi,
   /(apiKey|EXAMPLE_API_KEY|api_key|access_token)["']?\s*[:=]\s*["']?[^"',\s}]+/gi,
 ];
+
+/** Redact `<name>: <value>` for this header name (case-insensitive) in error text. */
+export function registerSecretHeader(name: string): void {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const pattern = new RegExp(String.raw`${escaped}:\s*[^,\s}]+`, 'gi');
+  if (!SECRET_PATTERNS.some(existing => existing.source === pattern.source)) {
+    SECRET_PATTERNS.push(pattern);
+  }
+}
 
 const registeredSecrets = new Set<string>();
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Renames the template's placeholder server across the repository:
+ * Renames the template's placeholder server across the repository, once:
  *
  *   example  -> <name>       (package, tool prefix, directories, file names)
  *   Example  -> <Name>       (class names, display text)
@@ -9,56 +9,69 @@
  * Usage: node scripts/rename.mjs <name> [PREFIX] [--dry-run]
  *
  * <name> is one lowercase word (letters and digits), e.g. `acme`. PREFIX
- * defaults to the upper-cased name. The name `.env.example` (its content is
- * renamed), LICENSE, .git, node_modules and dist are left alone, and the
- * "Using this template" section of README.md is removed.
+ * defaults to the upper-cased name. The file name `.env.example` (its
+ * content is renamed), LICENSE, .git, node_modules and dist are left alone.
+ *
+ * Template-only parts are removed: blocks between `template:start` and
+ * `template:end` markers (README.md, .github/workflows/ci.yml) and this
+ * script itself. The remaining checklist is in docs/NEW-SERVER.md.
  */
-import { readdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, renameSync, rmdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+const PLACEHOLDER_PACKAGE = 'mcp-server-example';
 
 const args = process.argv.slice(2);
 const dryRun = args.includes('--dry-run');
 const [name, prefixArg] = args.filter(arg => !arg.startsWith('--'));
 
-if (!name || !/^[a-z][a-z0-9]*$/.test(name) || name === 'example') {
-  console.error('Usage: node scripts/rename.mjs <name> [PREFIX] [--dry-run]');
-  console.error('<name> must be one lowercase word of letters and digits, e.g. acme.');
+function fail(message) {
+  console.error(message);
   process.exit(1);
 }
+
+if (!name || !/^[a-z][a-z0-9]*$/.test(name) || name === 'example') {
+  fail(
+    'Usage: node scripts/rename.mjs <name> [PREFIX] [--dry-run]\n' +
+      '<name> must be one lowercase word of letters and digits other than "example", e.g. acme.',
+  );
+}
 const prefix = prefixArg ?? name.toUpperCase();
-if (!/^[A-Z][A-Z0-9_]*[A-Z0-9]$|^[A-Z]$/.test(prefix)) {
-  console.error('PREFIX must be upper case letters, digits and underscores, e.g. ACME (no trailing underscore).');
-  process.exit(1);
+if (!/^[A-Z](?:[A-Z0-9_]*[A-Z0-9])?$/.test(prefix) || prefix === 'EXAMPLE') {
+  fail('PREFIX must be upper case letters, digits and underscores, e.g. ACME (no trailing underscore).');
 }
 const title = name.charAt(0).toUpperCase() + name.slice(1);
 
 const self = fileURLToPath(import.meta.url);
 const root = resolve(dirname(self), '..');
 
+const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
+if (pkg.name !== PLACEHOLDER_PACKAGE) {
+  fail(
+    `package.json is named ${JSON.stringify(pkg.name)}, not ${PLACEHOLDER_PACKAGE}: the placeholder has ` +
+      'already been renamed. Nothing changed. Delete scripts/rename.mjs.',
+  );
+}
+
 const SKIP_DIRS = new Set(['.git', 'node_modules', 'dist', 'coverage']);
 const SKIP_FILES = new Set(['LICENSE']);
-/** Text (and file names) that contain the word but are not the placeholder. */
-const PROTECTED = ['.env.example'];
+/** Text (and file name) that contains the word but is not the placeholder. */
+const PROTECTED = '.env.example';
+/** Marker-delimited template-only blocks, in Markdown or YAML comments. */
+const TEMPLATE_BLOCKS = [
+  /\n<!-- template:start -->[\s\S]*?<!-- template:end -->\n\n?/g,
+  /\n# template:start\n[\s\S]*?# template:end\n/g,
+];
 
-const TEMPLATE_SECTION = /\n<!-- template:start -->[\s\S]*?<!-- template:end -->\n\n/;
+const REPLACEMENTS = { EXAMPLE: prefix, Example: title, example: name };
 
+/** One pass, so a new name that contains the placeholder is not substituted twice. */
 function replaceAll(text) {
-  const tokens = [];
-  let protectedText = text;
-  PROTECTED.forEach((value, index) => {
-    const token = `\u0000${index}\u0000`;
-    tokens.push([token, value]);
-    protectedText = protectedText.split(value).join(token);
-  });
-  let result = protectedText
-    .replace(/EXAMPLE/g, prefix)
-    .replace(/Example/g, title)
-    .replace(/example/g, name);
-  for (const [token, value] of tokens) {
-    result = result.split(token).join(value);
-  }
-  return result;
+  return text
+    .split(PROTECTED)
+    .map(part => part.replace(/EXAMPLE|Example|example/g, match => REPLACEMENTS[match]))
+    .join(PROTECTED);
 }
 
 function walk(dir, files = [], dirs = []) {
@@ -89,10 +102,11 @@ for (const file of files) {
     continue;
   }
   const original = buffer.toString('utf8');
-  let updated = replaceAll(original);
-  if (relative(root, file) === 'README.md') {
-    updated = updated.replace(TEMPLATE_SECTION, '\n');
+  let updated = original;
+  for (const block of TEMPLATE_BLOCKS) {
+    updated = updated.replace(block, '\n');
   }
+  updated = replaceAll(updated);
   if (updated !== original) {
     changed += 1;
     console.log(`edit   ${relative(root, file)}`);
@@ -104,17 +118,25 @@ for (const file of files) {
 
 // Rename files, then directories, deepest first so parent paths stay valid.
 const renames = [...files, ...dirs]
-  .filter(path => basename(path).includes('example') && !PROTECTED.includes(basename(path)))
+  .filter(path => basename(path).includes('example') && basename(path) !== PROTECTED)
   .sort((a, b) => b.length - a.length);
 for (const path of renames) {
-  const target = join(dirname(path), basename(path).split('example').join(name));
+  const target = join(dirname(path), replaceAll(basename(path)));
   console.log(`rename ${relative(root, path)} -> ${relative(root, target)}`);
   if (!dryRun) {
-    if (statSync(target, { throwIfNoEntry: false })) {
-      console.error(`Refusing to overwrite ${relative(root, target)}.`);
-      process.exit(1);
+    if (existsSync(target)) {
+      fail(`Refusing to overwrite ${relative(root, target)}.`);
     }
     renameSync(path, target);
+  }
+}
+
+console.log(`delete ${relative(root, self)}`);
+if (!dryRun) {
+  unlinkSync(self);
+  const scripts = dirname(self);
+  if (readdirSync(scripts).length === 0) {
+    rmdirSync(scripts);
   }
 }
 
@@ -124,5 +146,5 @@ console.log(
 );
 if (!dryRun) {
   console.log('Next: review `git diff`, run `npm ci && npm run typecheck && npm test && npm run build`,');
-  console.log('then delete scripts/rename.mjs.');
+  console.log('and continue with docs/NEW-SERVER.md.');
 }

@@ -11,6 +11,30 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [22, 24]
+    name: test (Node ${{ matrix.node }})
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - run: npm audit --omit=dev --audit-level=high
+
+  server-json:
+    runs-on: ubuntu-latest
+    env:
+      # Pinned; bumped by hand together with release.yml.
+      MCP_PUBLISHER_VERSION: v1.8.9
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -18,7 +42,6 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
-          cache: npm
       - name: Check server.json matches package.json
         run: |
           node -e '
@@ -35,11 +58,24 @@ jobs:
             for (const [what, actual, expected] of bad) console.error(`::error::${what} is ${actual}, expected ${expected}`);
             process.exit(bad.length ? 1 : 0);
           '
-      - run: npm ci
-      - run: npm run typecheck
-      - run: npm test
-      - run: npm run build
-      - run: npm audit --omit=dev --audit-level=high
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - name: Download and verify mcp-publisher
+        run: |
+          set -euo pipefail
+          archive="mcp-publisher_linux_amd64.tar.gz"
+          base_url="https://github.com/modelcontextprotocol/registry/releases/download/${MCP_PUBLISHER_VERSION}"
+          curl --fail --location --silent --show-error --output "$RUNNER_TEMP/$archive" "$base_url/$archive"
+          curl --fail --location --silent --show-error --output "$RUNNER_TEMP/$archive.sigstore.json" "$base_url/$archive.sigstore.json"
+          cosign verify-blob \
+            --bundle "$RUNNER_TEMP/$archive.sigstore.json" \
+            --certificate-identity "https://github.com/modelcontextprotocol/registry/.github/workflows/release.yml@refs/tags/${MCP_PUBLISHER_VERSION}" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            "$RUNNER_TEMP/$archive"
+          tar xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP" mcp-publisher
+      # Checks the schema and the registry's semantic rules.
+      - name: Validate server.json
+        run: '"$RUNNER_TEMP/mcp-publisher" validate server.json'
 
   image:
     if: github.event_name == 'pull_request'
@@ -53,10 +89,10 @@ jobs:
         with:
           context: .
           push: false
+# template:start
+# Removed by scripts/rename.mjs. The rename script must produce a working server.
 
-  # Template repository only: the rename script must produce a working server.
   rename:
-    if: github.repository == 'borgels/mcp-server-template'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -66,14 +102,29 @@ jobs:
         with:
           node-version: 24
           cache: npm
-      - run: node scripts/rename.mjs acme ACME_CRM
-      - name: No placeholder left
+      - run: node scripts/rename.mjs myexample MY_EXAMPLE
+      - name: Script, CI job and placeholder are gone
         run: |
-          if grep -rn --exclude-dir=.git --exclude=LICENSE --exclude=rename.mjs -i 'example' . | grep -v '\.env\.example'; then
+          test ! -e scripts/rename.mjs
+          if grep -n 'template:start' .github/workflows/ci.yml README.md; then
+            echo '::error::template-only block left after rename'
+            exit 1
+          fi
+          # Every remaining "example" must be part of the new name or of .env.example.
+          if grep -rniP --exclude-dir=.git --exclude=LICENSE '(?<!my)(?<!my_)(?<!\.env\.)example' .; then
             echo '::error::placeholder text left after rename'
             exit 1
           fi
+      - name: Second run fails clearly
+        run: |
+          git checkout -- scripts/rename.mjs
+          if node scripts/rename.mjs again; then exit 1; fi
+          rm scripts/rename.mjs
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+      - run: npm audit --omit=dev --audit-level=high
+      - name: Server.json is valid after rename
+        run: node -e 'const s = require("./server.json"); if (s.description.length > 100) process.exit(1)'
+# template:end

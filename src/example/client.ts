@@ -1,5 +1,13 @@
 import { ConfigError, readEnvBoolean, readEnvInteger, readEnvString } from '../config-env.js';
-import { ExampleHttpError, describeUrl, formatUnknownError, parseRetryAfterMs, redactSecrets, registerSecret } from '../errors.js';
+import {
+  ExampleHttpError,
+  describeUrl,
+  formatUnknownError,
+  parseRetryAfterMs,
+  redactSecrets,
+  registerSecret,
+  registerSecretHeader,
+} from '../errors.js';
 import { USER_AGENT } from '../version.js';
 
 export interface ExampleClientOptions {
@@ -32,8 +40,9 @@ export type QueryValue = string | number | boolean | null | undefined;
 
 type HttpMethod = 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE';
 
-/** Header that carries the API key. Change it to match the upstream API. */
+/** Header that carries the API key. Change it to match the upstream API; error text redaction follows it. */
 export const API_KEY_HEADER = 'X-API-Key';
+registerSecretHeader(API_KEY_HEADER);
 
 /**
  * Hosts the API key may be sent to (exact host or any subdomain), e.g.
@@ -76,7 +85,34 @@ const TRANSIENT_NETWORK_CODES = new Set([
  * A missing API key or base URL only fails when a request is made, so the
  * tool list can be read without credentials.
  */
-export class ExampleClient {
+/**
+ * The client as handed to tool handlers. Read-only tools get a view whose
+ * non-GET methods throw (see readOnlyClient), so the write gate does not
+ * depend on tool annotations alone.
+ */
+export interface UpstreamClient {
+  get<T>(path: string, query?: Record<string, QueryValue>): Promise<T>;
+  post<T>(path: string, body?: unknown, query?: Record<string, QueryValue>): Promise<T>;
+  patch<T>(path: string, body?: unknown): Promise<T>;
+}
+
+/**
+ * A view of the client that only allows GET. A read-only tool that needs a
+ * POST (e.g. a search endpoint that takes a body) should get an explicit,
+ * named method here rather than the full client.
+ */
+export function readOnlyClient(client: UpstreamClient, toolName: string): UpstreamClient {
+  const refuse = (method: string) => async () => {
+    throw new Error(`Read-only tool ${toolName} attempted an upstream ${method}; refused.`);
+  };
+  return {
+    get: (path, query) => client.get(path, query),
+    post: refuse('POST'),
+    patch: refuse('PATCH'),
+  };
+}
+
+export class ExampleClient implements UpstreamClient {
   private readonly apiKey?: string;
   readonly baseUrl?: string;
   private readonly fetchImpl: typeof fetch;

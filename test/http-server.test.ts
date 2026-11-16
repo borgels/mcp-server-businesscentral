@@ -267,6 +267,13 @@ describe('HTTP transport (integration)', () => {
     await expect(send(port, { method: 'GET', path: '/healthz' })).rejects.toThrow();
   });
 
+  it('logs the request path without the query string', async () => {
+    const port = await start();
+    await send(port, { path: '/mcp?token=query-secret', headers: mcpHeaders, body: toolsList });
+    expect(logs.some(line => line.includes('POST /mcp from'))).toBe(true);
+    expect(logs.join(' ')).not.toContain('query-secret');
+  });
+
   it('returns 404 for other paths and 405 for other methods', async () => {
     const port = await start();
     expect((await send(port, { method: 'GET', path: '/other' })).status).toBe(404);

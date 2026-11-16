@@ -1,5 +1,5 @@
 import { encodePathParam } from '../path-params.js';
-import type { ExampleClient } from './client.js';
+import type { UpstreamClient } from './client.js';
 
 /**
  * Upstream API calls. Keep these thin: build the path from validated input,
@@ -7,12 +7,12 @@ import type { ExampleClient } from './client.js';
  * goes through encodePathParam.
  */
 
-export async function getItem(client: ExampleClient, input: { itemId: string }): Promise<unknown> {
+export async function getItem(client: UpstreamClient, input: { itemId: string }): Promise<unknown> {
   return client.get(`/items/${encodePathParam(input.itemId, 'itemId')}`);
 }
 
 export async function createItem(
-  client: ExampleClient,
+  client: UpstreamClient,
   input: { name: string; description?: string },
 ): Promise<unknown> {
   return client.post('/items', { name: input.name, description: input.description });

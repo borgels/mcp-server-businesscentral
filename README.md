@@ -12,16 +12,7 @@ A [Model Context Protocol](https://modelcontextprotocol.io) server for the Examp
 <!-- template:start -->
 ## Using this template
 
-This repository is a GitHub template for TypeScript MCP servers. It contains a minimal working server for a fictional upstream API (one read tool, one write tool) with hardened transports, client, policy, audit, tests and release workflows.
-
-1. Create a repository from the template, clone it and run `npm ci`.
-2. Rename the placeholder: `node scripts/rename.mjs <name> [PREFIX]`, e.g. `node scripts/rename.mjs acme` renames `example` to `acme`, `Example` to `Acme` and `EXAMPLE_` to `ACME_` in all files and paths (also this README, and it removes this section). Review `git diff`, run `npm ci && npm run typecheck && npm test && npm run build`, then delete `scripts/rename.mjs`.
-3. Check the metadata the script cannot know: `description`, `keywords` and repository URLs in `package.json`; `mcpName` and `name`, `title`, `description`, `repository` and `environmentVariables` in `server.json` (the owner part of `io.github.<owner>/...` must be the GitHub owner of the repository); `<Vendor>` in the disclaimer above; `CODEOWNERS`, `glama.json` and `SECURITY.md`.
-4. Implement the upstream API: `API_KEY_HEADER` and `UPSTREAM_HOST_SUFFIXES` in `src/<name>/client.ts`, the error model and status hints in `src/errors.ts`, API calls next to `src/<name>/items.ts`, tools in the table in `src/tools/<name>.ts` (strict zod input, correct annotations), audit fields in `src/<name>/audit.ts`. Update the tests, README tool table and `.env.example` alongside.
-5. First npm release: trusted publishing (OIDC) can only be configured for a package that exists. Publish the first version once by hand (`npm publish --access public` with a local npm login), then configure trusted publishing for `.github/workflows/release.yml`, e.g. `npm trust github <package> --repository <owner>/<repo> --file release.yml --allow-publish`, or on the package settings page on npmjs.com. Later releases: bump the version in `package.json`, `server.json` and `src/version.ts` (tests and CI check that they agree), update `CHANGELOG.md`, and push a `vX.Y.Z` tag; `release.yml` publishes to npm with provenance and then to the MCP Registry.
-6. Claim the server on Glama once the repository is public: `glama.json` lists the maintainers, then claim it on glama.ai to manage the listing.
-
-The publish and release jobs are skipped in the template repository itself.
+This repository is a GitHub template for TypeScript MCP servers: a minimal working server for a fictional upstream API (one read tool, one write tool) with hardened transports, client, policy, audit, tests and release workflows. After creating a repository from it, run `node scripts/rename.mjs <name> [PREFIX]` and follow [docs/NEW-SERVER.md](docs/NEW-SERVER.md). The rename removes this section; the checklist stays. Nothing is published from the template repository, or from a generated repository before the rename.
 <!-- template:end -->
 
 ## Tools
@@ -89,6 +80,8 @@ claude mcp add --transport http example http://127.0.0.1:3000/mcp \
   --header "Authorization: Bearer $TOKEN"
 ```
 
+To keep an audit log in the container, mount a writable directory and point `EXAMPLE_AUDIT_LOG` into it (e.g. `-v example-audit:/audit -e EXAMPLE_AUDIT_LOG=/audit/audit.jsonl`); the image runs as the `node` user and `/app` is not writable.
+
 Clients send `Authorization: Bearer <MCP_HTTP_TOKEN>`. The server will not start on a non-loopback address without a token of at least 32 characters. It does not terminate TLS; run it behind a reverse proxy or gateway that does.
 
 ## Configuration
@@ -133,7 +126,7 @@ Configuration is read from the environment (see `.env.example`). Invalid numbers
 - **One shared identity.** Every caller acts with the rights of the configured API key. Give it the least rights that work and rotate it regularly.
 - **Per-user authorization belongs in front of the server.** The server checks a single bearer token and does not know the end user. For multi-user use, run it behind an identity-aware gateway that decides which users may call which tools, holds the bearer token, and is the only network path to the server. Hosts can also embed the tools through the `./gateway` module export and pass the caller identity into the audit log.
 - **Tool access is not data access.** A gateway controls who may call which tool; every permitted caller still sees everything the API key can see. To separate data, run several instances with different keys.
-- **Writes are off by default.** Write tools are annotated as destructive so clients can ask for confirmation, and they do not run unless their audit record can be written.
+- **Writes are off by default.** Write tools are annotated as destructive so clients can ask for confirmation. Read-only tools get a client that refuses non-GET requests. When `EXAMPLE_AUDIT_LOG` is set, a write tool does not run unless its start record is written; without it there is no audit record.
 - **Upstream content is untrusted input.** Data returned by the API may be written by anyone with access to it. Tool results label it as data; clients that combine this server with other tools should treat it accordingly.
 - **The API key stays on the API origin.** Redirects are never followed, the base URL must use `https`, and error messages and audit records are redacted and size-capped.
 - **The HTTP transport fails closed.** It refuses to start on a non-loopback address or with any origin allowed unless a token is set, compares tokens in constant time, throttles failed authentication per client address, checks `Origin` and `Host` (DNS rebinding), and caps request bodies.
@@ -159,6 +152,14 @@ Project layout:
 | `src/transports/` | stdio and HTTP entry points; HTTP auth, origin and host checks. |
 | `src/gateway.ts` | Embeddable entry point (`./gateway` export). |
 | `src/config-env.ts` | Validated environment readers. |
+
+## Releasing
+
+1. Bump the version in `package.json`, `server.json` (`version` and the npm package `version`) and `src/version.ts`; tests and CI check that they agree. Update `CHANGELOG.md`. Merge.
+2. Tag the merged commit and push the tag: `git tag vX.Y.Z && git push origin vX.Y.Z`.
+3. `release.yml` tests, packs and publishes the tarball to npm with provenance (trusted publishing, no stored token), then publishes `server.json` to the MCP Registry. Versions already on npm or in the registry are skipped, so a failed run can be re-run. Pre-release tags (`vX.Y.Z-rc.1`) go to the npm dist-tag `next` and not to the registry. `publish.yml` pushes the `vX.Y.Z` image.
+
+The first version of a new package is published by hand; see the header of `.github/workflows/release.yml` (and [docs/NEW-SERVER.md](docs/NEW-SERVER.md)).
 
 ## License
 

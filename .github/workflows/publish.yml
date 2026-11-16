@@ -13,15 +13,39 @@ on:
 permissions:
   contents: read
 
+# One publish per ref at a time, so two quick pushes cannot race `latest`.
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   test:
     uses: ./.github/workflows/ci.yml
 
+  # Nothing is published from the template repository, or while the
+  # placeholder server is still present (scripts/rename.mjs exists).
+  guard:
+    if: github.repository != 'borgels/mcp-server-template'
+    runs-on: ubuntu-latest
+    outputs:
+      ready: ${{ steps.check.outputs.ready }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: check
+        run: |
+          if [ -e scripts/rename.mjs ]; then
+            echo "::warning::scripts/rename.mjs exists: the placeholder server has not been renamed; no image is published."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
   publish:
-    needs: test
-    # The template repository itself publishes nothing.
+    needs: [test, guard]
     if: >-
-      github.repository != 'borgels/mcp-server-template' &&
+      needs.guard.outputs.ready == 'true' &&
       (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
     runs-on: ubuntu-latest
     permissions:
@@ -31,6 +55,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # Image names must be lower case; owner and repository names may not be.
+      - id: image
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
@@ -48,6 +75,6 @@ jobs:
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
           tags: |
-            ${{ github.ref == 'refs/heads/main' && format('ghcr.io/{0}:latest', github.repository) || '' }}
-            ${{ github.ref == 'refs/heads/main' && format('ghcr.io/{0}:{1}', github.repository, github.sha) || '' }}
-            ${{ startsWith(github.ref, 'refs/tags/v') && format('ghcr.io/{0}:{1}', github.repository, github.ref_name) || '' }}
+            ${{ github.ref == 'refs/heads/main' && format('{0}:latest', steps.image.outputs.name) || '' }}
+            ${{ github.ref == 'refs/heads/main' && format('{0}:{1}', steps.image.outputs.name, github.sha) || '' }}
+            ${{ startsWith(github.ref, 'refs/tags/v') && format('{0}:{1}', steps.image.outputs.name, github.ref_name) || '' }}

@@ -2,11 +2,12 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Ajv } from 'ajv';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { UpstreamClient } from '../src/example/client.js';
 import { createServer, getDefaultClient } from '../src/server.js';
 import { exampleGatewayTools } from '../src/gateway.js';
-import { EXAMPLE_TOOLS } from '../src/tools/example.js';
-import { BASE, auditLines, connect, gateway, texts } from './helpers.js';
+import { EXAMPLE_TOOLS, executeTool } from '../src/tools/example.js';
+import { BASE, auditLines, connect, gateway, makeClient, texts } from './helpers.js';
 
 const originalEnv = { ...process.env };
 let dir: string;
@@ -86,10 +87,16 @@ describe('MCP tool surface', () => {
     expect((lines[0]?.target as Record<string, unknown>).nameSha256).toMatch(/^[0-9a-f]{64}$/);
   });
 
+  it('refuses an unwritable audit log path at startup', () => {
+    process.env.EXAMPLE_AUDIT_LOG = join(dir, 'missing-dir', 'audit.jsonl');
+    expect(() => createServer({ clientOptions: { apiKey: 'k' } })).toThrow('EXAMPLE_AUDIT_LOG');
+  });
+
   it('fails closed when the audit log cannot be written before a write', async () => {
     process.env.EXAMPLE_ENABLE_WRITES = 'true';
-    process.env.EXAMPLE_AUDIT_LOG = join(dir, 'missing-dir', 'audit.jsonl');
     const { mcpClient, fetchImpl } = await connect({ [`POST ${BASE}/items`]: { body: item } });
+    // The log becomes unwritable after startup.
+    process.env.EXAMPLE_AUDIT_LOG = join(dir, 'missing-dir', 'audit.jsonl');
     const result = await mcpClient.callTool({ name: 'example_create_item', arguments: { name: 'x' } });
     expect(result.isError).toBe(true);
     expect(texts(result).join(' ')).toContain('Audit log is not writable');
@@ -116,6 +123,31 @@ describe('MCP tool surface', () => {
     const lines = auditLines(process.env.EXAMPLE_AUDIT_LOG);
     expect(lines.at(-1)).toMatchObject({ action: 'error', httpStatus: 400 });
     expect(JSON.stringify(lines)).not.toContain('jane@');
+  });
+});
+
+describe('write gate beyond annotations', () => {
+  it('gives read-only tools a client that refuses non-GET requests', async () => {
+    const fetchImpl = vi.fn(async () => new Response('{}', { headers: { 'content-type': 'application/json' } }));
+    const client = makeClient(fetchImpl);
+    const misannotated = {
+      ...EXAMPLE_TOOLS[0]!,
+      name: 'example_get_item',
+      handler: async (c: UpstreamClient) => c.post('/items', { name: 'x' }),
+    };
+    await expect(executeTool(misannotated, client, { itemId: 'i1' })).rejects.toThrow(/Read-only tool .* POST/);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it('redacts error text centrally on the MCP path', async () => {
+    const { mcpClient } = await connect({
+      [`GET ${BASE}/items/i1`]: { status: 400, raw: 'echo test-api-key and X-API-Key: other-secret' },
+    });
+    const result = await mcpClient.callTool({ name: 'example_get_item', arguments: { itemId: 'i1' } });
+    expect(result.isError).toBe(true);
+    const text = texts(result).join(' ');
+    expect(text).not.toContain('test-api-key');
+    expect(text).not.toContain('other-secret');
   });
 });
 

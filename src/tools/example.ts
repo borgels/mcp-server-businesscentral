@@ -6,8 +6,9 @@ import {
   UNTRUSTED_RESULT_NOTE,
   WRITE_TOOL_ANNOTATIONS,
 } from '../example/annotations.js';
-import { auditTarget, newRequestId, writeAuditEvent } from '../example/audit.js';
-import type { ExampleClient } from '../example/client.js';
+import { assertAuditLogWritable, auditTarget, newRequestId, writeAuditEvent } from '../example/audit.js';
+import { readOnlyClient, type UpstreamClient } from '../example/client.js';
+import { formatUnknownError } from '../errors.js';
 import { createItem, getItem } from '../example/items.js';
 import { checkInputPolicy, checkToolPolicy, isToolDisabled, validatePolicyConfig } from '../example/policy.js';
 
@@ -33,7 +34,11 @@ export interface ToolDefinition<S extends z.ZodRawShape = z.ZodRawShape> {
   returnsUpstreamContent: boolean;
   /** Short human-readable summary used by the gateway result text. */
   summary: string;
-  handler: (client: ExampleClient, input: z.infer<z.ZodObject<S>>) => Promise<unknown>;
+  /**
+   * Read-only tools (readOnlyHint) receive a client view that refuses
+   * non-GET requests, so a mis-annotated tool cannot write.
+   */
+  handler: (client: UpstreamClient, input: z.infer<z.ZodObject<S>>) => Promise<unknown>;
 }
 
 function defineTool<S extends z.ZodRawShape>(definition: Omit<ToolDefinition<S>, 'inputSchema'>): ToolDefinition {
@@ -80,9 +85,10 @@ export function findTool(name: string): ToolDefinition | undefined {
   return EXAMPLE_TOOLS.find(tool => tool.name === name);
 }
 
-/** Validate the tool policy environment; call once at startup. */
+/** Validate the tool policy and audit environment; call once at startup. */
 export function validateToolConfig(): void {
   validatePolicyConfig(EXAMPLE_TOOLS.map(tool => tool.name));
+  assertAuditLogWritable();
 }
 
 /** Tools enabled on this instance (EXAMPLE_DISABLED_TOOLS removes them entirely). */
@@ -90,7 +96,7 @@ export function enabledTools(): ToolDefinition[] {
   return EXAMPLE_TOOLS.filter(tool => !isToolDisabled(tool.name));
 }
 
-export function registerTools(server: McpServer, client: ExampleClient): void {
+export function registerTools(server: McpServer, client: UpstreamClient): void {
   validateToolConfig();
   for (const tool of enabledTools()) {
     server.registerTool(
@@ -101,7 +107,14 @@ export function registerTools(server: McpServer, client: ExampleClient): void {
         inputSchema: tool.inputSchema,
         annotations: tool.annotations,
       },
-      async (input: Record<string, unknown>) => mcpToolResult(tool, await executeTool(tool, client, input)),
+      async (input: Record<string, unknown>) => {
+        try {
+          return mcpToolResult(tool, await executeTool(tool, client, input));
+        } catch (error) {
+          // Central redaction: no error text reaches the client unredacted.
+          return { isError: true, content: [{ type: 'text' as const, text: formatUnknownError(error) }] };
+        }
+      },
     );
   }
 }
@@ -137,7 +150,7 @@ export function normaliseCallContext(context: unknown): { requestId: string; cal
  */
 export async function executeTool(
   tool: ToolDefinition,
-  client: ExampleClient,
+  client: UpstreamClient,
   input: Record<string, unknown>,
   context?: CallContext,
 ): Promise<unknown> {
@@ -159,7 +172,8 @@ export async function executeTool(
   const startedAt = performance.now();
 
   try {
-    const result = await tool.handler(client, input as never);
+    const handlerClient = tool.annotations.readOnlyHint ? readOnlyClient(client, tool.name) : client;
+    const result = await tool.handler(handlerClient, input as never);
     await writeAuditEvent({
       requestId,
       tool: tool.name,

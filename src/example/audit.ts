@@ -1,7 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { accessSync, constants, statSync } from 'node:fs';
 import { appendFile } from 'node:fs/promises';
+import { dirname } from 'node:path';
 import { ExampleHttpError, formatUnknownError, redactSecrets } from '../errors.js';
-import { readEnvString } from '../config-env.js';
+import { ConfigError, readEnvString } from '../config-env.js';
 
 export interface AuditEvent {
   /** Shared by all events of one tool call (start/finish/error). */
@@ -40,6 +42,24 @@ export function auditErrorSummary(error: unknown): { httpStatus?: number; errorC
 
 export function newRequestId(): string {
   return randomUUID();
+}
+
+/**
+ * Startup check: when EXAMPLE_AUDIT_LOG is set, its directory must exist and
+ * be writable (and the file, if it exists, writable), so a typo fails at
+ * startup rather than refusing every write tool call later.
+ */
+export function assertAuditLogWritable(): void {
+  const auditPath = readEnvString('EXAMPLE_AUDIT_LOG');
+  if (!auditPath) {
+    return;
+  }
+  try {
+    const existing = statSync(auditPath, { throwIfNoEntry: false });
+    accessSync(existing ? auditPath : dirname(auditPath), constants.W_OK);
+  } catch {
+    throw new ConfigError(`EXAMPLE_AUDIT_LOG is not writable: ${auditPath}`);
+  }
 }
 
 /**
