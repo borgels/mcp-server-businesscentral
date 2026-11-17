@@ -9,7 +9,9 @@ import {
   type InstancePolicy,
 } from './example/policy.js';
 import { ConfigError } from './config-env.js';
-import { formatUnknownError, MIN_SECRET_LENGTH, type SecretRedactor } from './errors.js';
+import { formatUnknownError, redactDeep, SecretRedactor } from './errors.js';
+import { fixedOutputs, withheldResult } from './fallbacks.js';
+import { admitsKey, keyRefusedText, leaksSecret, sealedError } from './key-admission.js';
 import {
   auditRejectedCall,
   EXAMPLE_TOOLS,
@@ -173,10 +175,10 @@ function requiredCredential(options: ExampleGatewayOptions, name: 'apiKey' | 'ba
       `createExampleGateway requires options.${name}. Embedded instances do not read credentials from the environment.`,
     );
   }
-  // The redactor only protects secrets of MIN_SECRET_LENGTH characters or more; a shorter key could reach an error
-  // or an audit record as it is. Refuse it instead of using it unprotected.
-  if (name === 'apiKey' && value.trim().length < MIN_SECRET_LENGTH) {
-    throw new ConfigError(`createExampleGateway requires an apiKey of at least ${MIN_SECRET_LENGTH} characters.`);
+  // Key admission (src/key-admission.ts): printable ASCII of 16 characters or more, sharing no piece with any text of
+  // ours. Checked before anything is built from the key; the refusal is a fixed text that holds no piece of it.
+  if (name === 'apiKey' && !admitsKey(value.trim())) {
+    throw new ConfigError(keyRefusedText(value.trim()));
   }
   return value.trim();
 }
@@ -186,7 +188,45 @@ function requiredCredential(options: ExampleGatewayOptions, name: 'apiKey' | 'ba
  * are the only credentials the instance uses; a missing value fails here.
  */
 export function createExampleGateway(options: ExampleGatewayOptions) {
-  const apiKey = requiredCredential(options, 'apiKey');
+  let apiKey: string | undefined;
+  let guard: SecretRedactor | undefined;
+  // What the host gave, admitted or not: every error is masked against it.
+  const given: unknown = (options as Partial<ExampleGatewayOptions> | undefined)?.apiKey;
+  const secrets = typeof given === 'string' ? [given, given.trim()] : [];
+  try {
+    // Admission first, before a redactor is built from the key.
+    apiKey = requiredCredential(options, 'apiKey');
+    guard = new SecretRedactor().addSecret(apiKey);
+    // The fixed outputs of the sink check (src/fallbacks.ts) must hold no piece of the key.
+    if (leaksSecret(fixedOutputs(), guard)) {
+      throw new ConfigError(keyRefusedText(apiKey));
+    }
+    const gateway = buildGateway(options, apiKey);
+    // The tool list leaves the gateway as it is: a key that shares a piece with it is refused.
+    if (leaksSecret(gateway.tools, guard)) {
+      throw new ConfigError(keyRefusedText(apiKey));
+    }
+    return gateway;
+  } catch (error) {
+    const raw = error instanceof Error ? error.message : String(error);
+    let message = raw;
+    if (guard && apiKey !== undefined) {
+      // Redacted, then checked whole as the very last step: a message that still holds a piece of the key becomes
+      // the fixed refusal.
+      message = guard.redact(raw);
+      if (leaksSecret(message, guard)) message = keyRefusedText(apiKey);
+    }
+    // A fresh error in final form (src/key-admission.ts, sealedError): no cause, a stack without frames, and name,
+    // message and stack masked against the key. Then the sink check on the finished object.
+    const final = sealedError(error instanceof ConfigError ? new ConfigError(message) : new Error(message), ...secrets);
+    if (guard && apiKey !== undefined && leaksSecret(final, guard)) {
+      throw sealedError(new ConfigError(keyRefusedText(apiKey)), ...secrets);
+    }
+    throw final;
+  }
+}
+
+function buildGateway(options: ExampleGatewayOptions, apiKey: string) {
   const baseUrl = requiredCredential(options, 'baseUrl');
   const { policy: hostPolicy, ...clientOptions } = options;
   const policy =
@@ -213,7 +253,19 @@ export function createExampleGateway(options: ExampleGatewayOptions) {
     /** Tools enabled on this instance (the policy's or EXAMPLE_DISABLED_TOOLS' disabled tools are left out). */
     tools: underPolicy(() => exampleGatewayTools.filter(tool => !isToolDisabled(tool.name))),
     callTool(toolName: string, input: GatewayJsonObject = {}, context?: GatewayCallContext): Promise<GatewayToolResult> {
-      return underPolicy(() => runCall(toolName, input, context));
+      // The whole result, text and data (keys included, numbers by their string form), with this instance's secrets
+      // redacted: upstream data can echo the key, and so can an error. Redacted first, as data and depth-limited, and
+      // only then copied as JSON, so no key is serialised and no deep value can exhaust the stack.
+      return underPolicy(() =>
+        runCall(toolName, input, context).then(
+          // A second pass covers what the first one inserted (the depth placeholder). Then the sink check, as the very
+          // last step: a result that holds a piece of the key anywhere, outer fields included, is withheld whole.
+          result => {
+            const final = JSON.parse(JSON.stringify(redactDeep(redactDeep(result, redactor), redactor))) as GatewayToolResult;
+            return leaksSecret(final, redactor) ? withheldResult() : final;
+          },
+        ),
+      );
     },
   };
 
@@ -251,10 +303,11 @@ export function createExampleGateway(options: ExampleGatewayOptions) {
 /** One gateway instance, as returned by createExampleGateway. */
 export type ExampleGateway = ReturnType<typeof createExampleGateway>;
 
+/** The data as it came; callTool redacts it and only then copies it as JSON. */
 function jsonResult(text: string, structuredContent: unknown): GatewayToolResult {
   return {
     content: [{ type: 'text', text }],
-    structuredContent: JSON.parse(JSON.stringify(structuredContent ?? null)) as GatewayJsonValue,
+    structuredContent: (structuredContent ?? null) as GatewayJsonValue,
   };
 }
 

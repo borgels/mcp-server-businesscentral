@@ -119,26 +119,25 @@ describe('ExampleClient', () => {
 });
 
 describe('error handling', () => {
-  it('formats error bodies with a status hint', async () => {
+  it('gives the status and our own hint, never the vendor body or code', async () => {
     const fetchImpl = makeFetch(() => jsonResponse({ code: 'invalid_key', message: 'Unrecognized key' }, 401));
     const error = await makeClient(fetchImpl).get('/x').catch((e: unknown) => e);
 
     expect(error).toBeInstanceOf(ExampleHttpError);
     expect((error as ExampleHttpError).status).toBe(401);
-    expect((error as ExampleHttpError).errorCode).toBe('invalid_key');
-    expect((error as Error).message).toContain('Unrecognized key');
+    expect((error as Error).message).toContain('HTTP 401');
     expect((error as Error).message).toContain('EXAMPLE_API_KEY');
+    expect((error as Error).message).not.toContain('Unrecognized key');
+    expect((error as Error).message).not.toContain('invalid_key');
   });
 
-  it('truncates long error bodies', async () => {
+  it('never puts an error body in the error', async () => {
     const html = `<html>${'x'.repeat(5000)}</html>`;
     const fetchImpl = makeFetch(() => new Response(html, { status: 502, headers: { 'content-type': 'text/html' } }));
     const error = (await makeClient(fetchImpl, { maxAttempts: 1 })
       .get('/x')
       .catch((e: unknown) => e)) as ExampleHttpError;
-    expect(error.message.length).toBeLessThan(700);
-    expect(error.message).toContain('truncated');
-    expect(String(error.payload).length).toBeLessThan(700);
+    expect(error.message).toBe('Example API request failed with HTTP 502');
   });
 
   it('reads at most 64 KB of an error body', async () => {
@@ -176,18 +175,17 @@ describe('error handling', () => {
       .get('/x')
       .catch((e: unknown) => e)) as ExampleHttpError;
     expect(echoed.message).not.toContain(apiKey);
-    expect(echoed.message).toContain('[REDACTED]');
-    expect(String(echoed.payload)).not.toContain(apiKey);
+    expect(echoed.message).not.toContain('proxy error');
 
     const boundary = (await respond(`${'x'.repeat(490)}${apiKey}`)
       .get('/x')
       .catch((e: unknown) => e)) as ExampleHttpError;
-    expect(boundary.message).not.toContain(apiKey.slice(0, 8));
+    expect(boundary.message).not.toContain(apiKey.slice(0, 6));
 
     const nested = (await respond(JSON.stringify({ message: 'bad', nested: { echo: apiKey } }), 'application/json')
       .get('/x')
       .catch((e: unknown) => e)) as ExampleHttpError;
-    expect(JSON.stringify(nested.payload)).not.toContain(apiKey);
+    expect(JSON.stringify(nested)).not.toContain(apiKey);
 
     expect(redactSecrets('X-API-KEY: abc123')).not.toContain('abc123');
     expect(redactSecrets('Authorization: Bearer abc123')).not.toContain('abc123');
@@ -197,7 +195,7 @@ describe('error handling', () => {
   it('redacts the configured key header by name', () => {
     const redactor = new SecretRedactor().addHeader('X-Vendor-Token').addHeader(API_KEY_HEADER);
     const redactSecrets = (text: string) => redactor.redact(text);
-    expect(redactSecrets('sent x-vendor-token: abc123, ok')).toBe('sent x-vendor-token: [REDACTED], ok');
+    expect(redactSecrets('sent x-vendor-token: abc123, ok')).toBe('sent x-vendor-token: ‹redacted›, ok');
     expect(redactSecrets(`${API_KEY_HEADER}: abc123`)).not.toContain('abc123');
     for (const text of [
       '{"X-Vendor-Token":"abc123"}',
@@ -236,11 +234,17 @@ describe('error handling', () => {
     expect(parseRetryAfterMs(null, now)).toBeUndefined();
   });
 
-  it('includes the cause of network errors', async () => {
+  it('names only the system error code of a network error, never its message', async () => {
     const fetchImpl = makeFetch(() => {
-      throw new TypeError('fetch failed', { cause: new Error('getaddrinfo ENOTFOUND api.vendor.test') });
+      throw new TypeError('fetch failed somewhere odd', {
+        cause: Object.assign(new Error('getaddrinfo ENOTFOUND api.vendor.test'), { code: 'ENOTFOUND' }),
+      });
     });
-    await expect(makeClient(fetchImpl).get('/x')).rejects.toThrow(/fetch failed \(cause: getaddrinfo ENOTFOUND/);
+    const message = await makeClient(fetchImpl, { maxAttempts: 1 })
+      .get('/x')
+      .catch((e: Error) => e.message);
+    expect(message).toMatch(/Network error calling the Example API \(GET\) \(ENOTFOUND\)\./);
+    expect(message).not.toMatch(/odd|getaddrinfo/);
   });
 
   it('reports timeouts clearly', async () => {
@@ -256,7 +260,7 @@ describe('error handling', () => {
         ),
     );
     await expect(makeClient(fetchImpl).get('/items?cursor=c')).rejects.toThrow(
-      /timed out after \d+ ms \(GET https:\/\/api\.vendor\.test\/v1\/items\)/,
+      /timed out after \d+ ms \(GET\)/,
     );
   });
 
@@ -277,9 +281,10 @@ describe('redirects', () => {
     const message = await makeClient(fetchImpl)
       .get('/items')
       .catch((e: Error) => e.message);
-    expect(message).toContain('redirect (HTTP 302) to https://other.vendor.test/v1/items for GET');
+    expect(message).toContain('redirect (HTTP 302) for GET');
     expect(message).toContain('EXAMPLE_BASE_URL');
-    expect(message).not.toContain('t=1');
+    // The Location is the vendor's text: never quoted.
+    expect(message).not.toContain('other.vendor.test');
     await expect(makeClient(fetchImpl).post('/items', {})).rejects.toThrow(/redirect/);
     expect(fetchImpl).toHaveBeenCalledTimes(2);
     expect(fetchImpl.mock.calls.every(([url]) => !String(url).includes('other.vendor.test'))).toBe(true);

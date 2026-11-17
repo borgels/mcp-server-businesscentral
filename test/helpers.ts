@@ -47,7 +47,7 @@ export async function connect(routes: Record<string, Stub> = {}) {
 export function gateway(routes: Record<string, Stub> = {}) {
   const fetchImpl = stubFetch(routes);
   const gw = createExampleGateway({
-    apiKey: 'test-api-key',
+    apiKey: 'tttt-gggg-wwww-vvvv-1',
     baseUrl: BASE,
     fetchImpl: fetchImpl as unknown as typeof fetch,
   });

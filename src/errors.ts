@@ -1,18 +1,44 @@
 /**
- * Error body of the upstream API. Adjust to the vendor's documented error
- * model; every field is optional and read defensively.
+ * Errors and redaction.
+ *
+ * The rule: no text the upstream API controls ever reaches a host, a result
+ * or an audit record through an error. An HTTP error carries the status, our
+ * own hint for it, and a parsed Retry-After; never the response body, the
+ * vendor's error code or message, or a redirect's Location. Upstream text can
+ * quote the request, personal data, or part of the key, and no redactor
+ * recognises every fragment.
+ *
+ * Redaction is the second line: every instance redacts its key (the exact
+ * value, its URL- and JSON-encoded forms, and any fragment of
+ * FRAGMENT_LENGTH characters or more) from everything it returns, always on
+ * structured values before they are serialised, and before anything is cut
+ * short.
  */
-export interface UpstreamErrorPayload {
-  message?: string;
-  error?: string;
-  code?: string | number;
-  details?: unknown;
-}
 
-/** Maximum length of any single piece of text taken from a response body. */
-export const MAX_ERROR_TEXT = 500;
 /** Configured secrets shorter than this are not redacted by value (too likely to hit normal text). */
 export const MIN_SECRET_LENGTH = 8;
+/** Any piece of a secret this long or longer is redacted, wherever it appears. */
+export const FRAGMENT_LENGTH = 6;
+/** Values nested deeper than this are replaced by redactDeep, never passed on. */
+export const MAX_REDACT_DEPTH = 64;
+/**
+ * What a redacted value is replaced by. Its brackets are not ASCII, so it cannot be a piece of a key typed or
+ * issued as ASCII; a key that contains it or shares a FRAGMENT_LENGTH piece with it is refused (overlapsMarker).
+ */
+export const REDACTION_MARKER = '‹redacted›';
+
+/** Whether a secret could survive its own redaction: it contains the marker, or shares a piece with it. */
+export function overlapsMarker(value: string): boolean {
+  if (value.includes(REDACTION_MARKER)) {
+    return true;
+  }
+  for (let i = 0; i + FRAGMENT_LENGTH <= REDACTION_MARKER.length; i += 1) {
+    if (value.includes(REDACTION_MARKER.slice(i, i + FRAGMENT_LENGTH))) {
+      return true;
+    }
+  }
+  return false;
+}
 
 /** Matches `<name>: <value>`, `<name>=<value>` and `"<name>": "<value>"` for one header (case-insensitive). */
 function headerPattern(name: string): RegExp {
@@ -30,24 +56,27 @@ const BASE_PATTERNS: readonly RegExp[] = [
 
 /**
  * Redacts the secrets of one client, and so of one gateway or server
- * instance: exact secret values, and the values of named credential headers.
- * Each instance owns its redactor, so a host that runs several tenants in
- * one process never mixes their keys, and a tenant's key is released with
- * its instance. There is no process-wide registry.
+ * instance: the exact values (raw, URL-encoded and JSON-escaped), every
+ * fragment of FRAGMENT_LENGTH characters or more of them, and the values of
+ * named credential headers. Each instance owns its redactor, so a host that
+ * runs several tenants in one process never mixes their keys, and a tenant's
+ * key is released with its instance. There is no process-wide registry.
  */
 export class SecretRedactor {
   private readonly secrets = new Set<string>();
+  private readonly fragments = new Set<string>();
   private readonly patterns: RegExp[] = [...BASE_PATTERNS];
 
-  /** Redact this exact value (and its URL-encoded form). Values shorter than 8 characters are ignored. */
+  /** Redact this value and every piece of it. Values shorter than MIN_SECRET_LENGTH are ignored. */
   addSecret(value: string | undefined): this {
     if (!value || value.length < MIN_SECRET_LENGTH) {
       return this;
     }
-    this.secrets.add(value);
-    const encoded = encodeURIComponent(value);
-    if (encoded !== value) {
-      this.secrets.add(encoded);
+    for (const form of new Set([value, encodeURIComponent(value), JSON.stringify(value).slice(1, -1)])) {
+      this.secrets.add(form);
+      for (let i = 0; i + FRAGMENT_LENGTH <= form.length; i += 1) {
+        this.fragments.add(form.slice(i, i + FRAGMENT_LENGTH));
+      }
     }
     return this;
   }
@@ -66,12 +95,53 @@ export class SecretRedactor {
     return this.secrets.has(value);
   }
 
+  /** Whether the text contains one of the secrets in any form, or any FRAGMENT_LENGTH-character piece of one. */
+  matches(text: string): boolean {
+    for (const secret of this.secrets) {
+      if (text.includes(secret)) return true;
+    }
+    if (this.fragments.size === 0) return false;
+    for (let i = 0; i + FRAGMENT_LENGTH <= text.length; i += 1) {
+      if (this.fragments.has(text.slice(i, i + FRAGMENT_LENGTH))) return true;
+    }
+    return false;
+  }
+
   redact(value: string): string {
     let result = value;
     for (const secret of this.secrets) {
-      result = result.split(secret).join('[REDACTED]');
+      result = result.split(secret).join('‹redacted›');
     }
-    return applyPatterns(result, this.patterns);
+    return applyPatterns(this.redactFragments(result), this.patterns);
+  }
+
+  /** Every run of text covered by a FRAGMENT_LENGTH-character piece of a secret becomes one ‹redacted›. */
+  private redactFragments(text: string): string {
+    if (this.fragments.size === 0 || text.length < FRAGMENT_LENGTH) {
+      return text;
+    }
+    let covered: Uint8Array | undefined;
+    for (let i = 0; i + FRAGMENT_LENGTH <= text.length; i += 1) {
+      if (this.fragments.has(text.slice(i, i + FRAGMENT_LENGTH))) {
+        covered ??= new Uint8Array(text.length);
+        covered.fill(1, i, i + FRAGMENT_LENGTH);
+      }
+    }
+    if (!covered) {
+      return text;
+    }
+    let out = '';
+    let i = 0;
+    while (i < text.length) {
+      if (covered[i]) {
+        out += '‹redacted›';
+        while (i < text.length && covered[i]) i += 1;
+      } else {
+        out += text[i];
+        i += 1;
+      }
+    }
+    return out;
   }
 }
 
@@ -81,16 +151,13 @@ function applyPatterns(value: string, patterns: readonly RegExp[]): string {
       current.replace(pattern, match => {
         // Split at the first separator only: the value may itself contain `:` or `=`.
         const [, key = 'secret', separator = ':'] = /^(.*?)\s*([:=])/.exec(match) ?? [];
-        return `${key.trim()}${separator} [REDACTED]`;
+        return `${key.trim()}${separator} ‹redacted›`;
       }),
     value,
   );
 }
 
-/**
- * Actionable guidance per HTTP status. Replace or extend with the vendor's
- * documented error codes.
- */
+/** Our own guidance per HTTP status. Replace or extend with the vendor's documented statuses. */
 const STATUS_HINTS: Record<number, string> = {
   401: 'The API key was rejected (invalid or expired). The server operator must renew EXAMPLE_API_KEY.',
   403: 'The API key has no access to this resource. Retrying will not help.',
@@ -98,33 +165,36 @@ const STATUS_HINTS: Record<number, string> = {
   429: 'The upstream API is throttling requests. Wait and retry later.',
 };
 
+/**
+ * An HTTP error from the upstream API. It keeps the status and the parsed
+ * Retry-After, nothing from the response body: the message is our own.
+ */
 export class ExampleHttpError extends Error {
   readonly status: number;
   readonly url: string;
-  readonly payload?: UpstreamErrorPayload | unknown;
+  /** Seconds to wait, parsed from Retry-After; undefined when absent or malformed. */
   readonly retryAfter?: string;
-  readonly errorCode?: string;
 
-  constructor(input: {
-    status: number;
-    url: string;
-    payload?: UpstreamErrorPayload | unknown;
-    retryAfter?: string;
-    /** Redactor of the client that made the request. */
-    redactor?: SecretRedactor;
-  }) {
-    const redact = (value: string) => redactSecrets(value, input.redactor);
-    super(formatHttpError(input, redact));
+  constructor(input: { status: number; url: string; retryAfter?: string }) {
+    super(httpErrorMessage(input.status, input.retryAfter));
     this.name = 'ExampleHttpError';
     this.status = input.status;
-    this.url = redact(describeUrl(input.url));
-    this.payload =
-      typeof input.payload === 'string' ? truncate(redact(input.payload)) : redactDeep(input.payload, input.redactor);
-    this.retryAfter = input.retryAfter;
-    const code = asErrorPayload(input.payload)?.code;
-    this.errorCode =
-      typeof code === 'string' || typeof code === 'number' ? truncate(redact(String(code)), 64) : undefined;
+    this.url = describeUrl(input.url);
+    const retryMs = parseRetryAfterMs(input.retryAfter);
+    this.retryAfter = retryMs === undefined ? undefined : String(Math.ceil(retryMs / 1000));
   }
+}
+
+/** The whole text of an HTTP error: status, our hint, and a parsed Retry-After in seconds. */
+export function httpErrorMessage(status: number, retryAfter?: string): string {
+  const retryMs = parseRetryAfterMs(retryAfter);
+  return [
+    `Example API request failed with HTTP ${status}`,
+    Object.hasOwn(STATUS_HINTS, status) ? STATUS_HINTS[status] : undefined,
+    retryMs === undefined ? undefined : `retry-after=${Math.ceil(retryMs / 1000)}s`,
+  ]
+    .filter(Boolean)
+    .join(' | ');
 }
 
 export function formatUnknownError(error: unknown, redactor?: SecretRedactor): string {
@@ -152,13 +222,34 @@ export function describeUrl(url: string | URL): string {
   }
 }
 
-/** Copy of a JSON-like value with every string passed through redactSecrets. */
+/**
+ * Copy of a JSON-like value with every string, object keys included, passed
+ * through redactSecrets, and every number, boolean or bigint whose string form
+ * would be redacted replaced by the string "‹redacted›" (so the copy still
+ * serialises to valid JSON). Redact a value with this before it is serialised:
+ * a serialised secret is escaped, and the escaped form is easy to miss.
+ * Anything nested deeper than MAX_REDACT_DEPTH is replaced, never passed on,
+ * so a deep value cannot exhaust the stack when the copy is serialised.
+ */
 export function redactDeep(value: unknown, redactor?: SecretRedactor, depth = 0): unknown {
+  if (depth > MAX_REDACT_DEPTH) {
+    return '[nested too deep]';
+  }
   if (typeof value === 'string') {
     return redactSecrets(value, redactor);
   }
-  if (typeof value !== 'object' || value === null || depth > 20) {
+  if (typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint') {
+    const text = String(value);
+    if (redactSecrets(text, redactor) !== text) return '‹redacted›';
+    return typeof value === 'bigint' ? text : value;
+  }
+  if (typeof value !== 'object' || value === null) {
     return value;
+  }
+  const json = (value as { toJSON?: unknown }).toJSON;
+  if (typeof json === 'function') {
+    // A Date and the like: redact what JSON.stringify would write.
+    return redactDeep(json.call(value), redactor, depth + 1);
   }
   if (Array.isArray(value)) {
     return value.map(entry => redactDeep(entry, redactor, depth + 1));
@@ -167,6 +258,93 @@ export function redactDeep(value: unknown, redactor?: SecretRedactor, depth = 0)
     Object.entries(value).map(([key, entry]) => [
       redactSecrets(key, redactor),
       redactDeep(entry, redactor, depth + 1),
+    ]),
+  );
+}
+
+/**
+ * Text for a failure kept inside a result that is otherwise returned (one
+ * part of a combined read that could not be fetched): the HTTP status, or a
+ * fixed text. Never the error's own message.
+ */
+export function nestedFailureText(error: unknown): string {
+  if (error instanceof ExampleHttpError) {
+    return `Example API request failed with HTTP ${error.status}`;
+  }
+  if (error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError')) {
+    return 'Example API request timed out.';
+  }
+  return 'Example API request failed.';
+}
+
+/** Keys whose value is a failure context: anything inside that carries an error or a message is a failure. */
+const FAILURE_CONTEXTS = new Set(['failures', 'failure', 'errors', 'error', 'metadata', 'warnings', 'amount']);
+/** Fields that make an object in a failure context a failure. */
+const FAILURE_FIELDS = ['error', 'errors', 'failures', 'warnings', 'message', 'detail', 'description'];
+/** Failure lists: every element in one is a failure, whatever its fields. */
+const FAILURE_LISTS = new Set(['failures', 'failure', 'errors', 'error', 'warnings']);
+
+/** One element of a failure list, reduced to a numeric status (when it has one) and our own text. */
+function failureEntry(value: unknown): { status?: number; message: string } {
+  const status =
+    typeof value === 'object' && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>).status : undefined;
+  return typeof status === 'number' && Number.isInteger(status) && status >= 100 && status <= 599
+    ? { status, message: `Example API request failed with HTTP ${status}` }
+    : { message: 'Example API request failed.' };
+}
+
+/** A failure list: every element (an object with any fields, a text, a list) becomes a failureEntry. */
+function failureList(value: unknown): unknown {
+  if (value === null || value === undefined) {
+    return value;
+  }
+  return Array.isArray(value) ? value.map(failureEntry) : failureEntry(value);
+}
+
+/**
+ * Copy of a successful body with every failure reported inside it reduced to
+ * its HTTP status and our own text.
+ *
+ * - Every element of a failure list (`failures`, `failure`, `errors`,
+ *   `error`, `warnings`), at any depth, becomes `{ status?, message }`: a
+ *   numeric status is kept, and every other field, whatever its name, is
+ *   dropped. Nothing below a failure list is kept.
+ * - Elsewhere a failure is an object with a numeric `status` of 400 or
+ *   more, an object with an `error` field, or an object in a failure
+ *   context (`metadata`, `amount` and the like, also through wrappers such
+ *   as `data` below them) with any of `error`, `errors`, `failures`,
+ *   `warnings`, `message`, `detail` or `description`. It becomes
+ *   `{ status?, error }` with our own text.
+ *
+ * A text outside a failure list, an amount among them, is kept.
+ * Depth-limited.
+ */
+export function nestedFailuresAsStatus(value: unknown, depth = 0, context = false): unknown {
+  if (depth > 64) {
+    return '[nested too deep]';
+  }
+  if (typeof value !== 'object' || value === null) {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.map(entry => nestedFailuresAsStatus(entry, depth + 1, context));
+  }
+  const record = value as Record<string, unknown>;
+  const status = record.status;
+  const failedStatus = typeof status === 'number' && Number.isInteger(status) && status >= 400 && status <= 599;
+  const present = (field: string) => Object.hasOwn(record, field) && record[field] !== null && record[field] !== undefined;
+  if (failedStatus || present('error') || (context && FAILURE_FIELDS.some(present))) {
+    return failedStatus
+      ? { status, error: `Example API request failed with HTTP ${status}` }
+      : { error: 'Example API request failed.' };
+  }
+  return Object.fromEntries(
+    Object.entries(record).map(([key, entry]) => [
+      key,
+      FAILURE_LISTS.has(key)
+        ? failureList(entry)
+        : // A failure context holds through wrappers such as `data` below it.
+          nestedFailuresAsStatus(entry, depth + 1, context || FAILURE_CONTEXTS.has(key)),
     ]),
   );
 }
@@ -196,58 +374,4 @@ export function parseRetryAfterMs(value: string | null | undefined, now: number 
     return undefined;
   }
   return date - now;
-}
-
-export function truncate(value: string, max: number = MAX_ERROR_TEXT): string {
-  return value.length > max ? `${value.slice(0, max)}… [truncated, ${value.length} chars]` : value;
-}
-
-function formatHttpError(
-  input: { status: number; url: string; payload?: unknown; retryAfter?: string },
-  redact: (value: string) => string,
-): string {
-  const payload = asErrorPayload(input.payload);
-  const text = (value: unknown) => detailText(value, redact);
-  const details = [text(payload?.code), text(payload?.error), text(payload?.message)].filter(Boolean);
-  if (details.length === 0) {
-    // Redact before truncating so a secret cut at the boundary cannot leak a prefix.
-    if (payload !== undefined) {
-      details.push(truncate(redact(JSON.stringify(payload))));
-    } else if (typeof input.payload === 'string' && input.payload.trim()) {
-      details.push(truncate(redact(input.payload.trim())));
-    }
-  }
-
-  const parts = [
-    `Example API request failed with HTTP ${input.status}`,
-    ...details,
-    Object.hasOwn(STATUS_HINTS, input.status) ? STATUS_HINTS[input.status] : undefined,
-    formatRetryAfter(input.retryAfter),
-  ].filter(Boolean);
-
-  return redact(parts.join(' | '));
-}
-
-function formatRetryAfter(value: string | undefined): string | undefined {
-  if (!value) {
-    return undefined;
-  }
-  const ms = parseRetryAfterMs(value);
-  return ms === undefined ? undefined : `retry-after=${Math.ceil(ms / 1000)}s`;
-}
-
-function detailText(value: unknown, redact: (value: string) => string): string | undefined {
-  if (typeof value === 'number' && Number.isFinite(value)) {
-    return String(value);
-  }
-  if (typeof value !== 'string' || !value.trim()) {
-    return undefined;
-  }
-  return truncate(redact(value.trim()));
-}
-
-function asErrorPayload(value: unknown): UpstreamErrorPayload | undefined {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-    ? (value as UpstreamErrorPayload)
-    : undefined;
 }

@@ -137,6 +137,62 @@ const result = await gateway.callTool('get_item', { itemId: 'i1' }, { caller: 'u
 - **Instance policy from the host.** Pass `policy` to `createExampleGateway`: `enableWrites` (default false), `disabledTools` (must name known tools) and `audit`, a function that receives each audit record instead of `EXAMPLE_AUDIT_LOG` (without it the instance writes no audit; a write tool does not run if the sink throws on its start record). An instance with `policy` reads none of `EXAMPLE_ENABLE_WRITES`, `EXAMPLE_DISABLED_TOOLS`, `EXAMPLE_AUDIT_LOG` or `EXAMPLE_ALLOW_CUSTOM_BASE_URL`, so tenants in one process can have different settings. Without `policy` the instance uses the environment, like the MCP server. Each call runs in a scope of its own, so a call made from inside another instance's call never inherits its policy, sink or redactor, and every audit record is redacted as a whole with the instance's own key before the sink sees it. The limits (`EXAMPLE_TIMEOUT_MS`, ...) are still read from the environment and apply to every gateway in the process. Per-user and per-tenant authorization is the host's job.
 - **Tool catalog.** `exampleToolCatalog` is a frozen list of every tool: `name` (without the `example_` prefix), `title`, `description`, `riskLevel` (`read`, `write` or `destructive`), `enabledByDefault`, `inputSchema` (JSON Schema), `broad` (true when a tool can read more than its name says, so a host gives it only to roles that may read everything) and `upstream`, the API requests the tool may make (`access`, `method` and path template). It is generated from the same tool table as the MCP server, so it cannot drift from the registered tools. `exampleGatewayTools` holds the same definitions without `upstream` and `broad`; `gateway.tools` lists those enabled on the instance.
 
+## Threat model
+
+What this server guarantees about the API key, and what it does not. It is
+the yardstick for every change that touches errors, results or audit.
+
+**Scope.** Guarantees (a), (b) and (c) apply to the embeddable gateway
+(`./gateway`), the surface a multi-tenant host uses. The standalone MCP
+server, configured from the environment for one key, keeps best-effort
+redaction: its errors and audit records are redacted with its key, but it is
+not held to these guarantees.
+
+**Guaranteed:**
+
+- **(a) The key never reaches anything persisted or shared:** audit sinks and
+  the audit log file, logs, error texts, export hooks or files. Errors are
+  our own texts; audit records and everything a gateway instance returns are
+  redacted with the instance's own key before they leave it.
+- **(b) No vendor-controlled free text in errors.** An error carries our own
+  fixed text, the HTTP status, numbers we parse (Retry-After), and codes from
+  a fixed list we wrote down; never a response body, a vendor message or
+  code, a redirect's `Location`, a type or field name from the vendor, or
+  the message of an error thrown while reading a response. A failure kept
+  inside an otherwise returned result is the status or a fixed text as well.
+  Errors never quote the key, the configured address or a refused configuration value (a timeout names its limit in milliseconds).
+- **(c) Results go only to the tenant whose key it is.** One gateway
+  instance per tenant; every call runs in a scope of its own; nothing about a
+  tenant is kept in process-wide state. The MCP server serves one key.
+
+**Not guaranteed (residual risk):** a vendor that deliberately echoes the
+customer's own key back in data. Results are redacted on a best-effort
+basis: the exact key, its URL- and JSON-encoded forms and any piece of it of
+6 characters or more, in strings, object keys and the string form of
+numbers and booleans, are replaced by `"‹redacted›"` before anything is
+serialised. A key that comes back otherwise transformed (split into pieces
+shorter than 6 characters, reversed, re-encoded, hashed) is not recognised.
+Such data reaches only the tenant whose key it is, which already holds the
+key. **What leaves a gateway holds no piece of the key.** This is checked at
+the sink, not inferred from our texts: every output is checked in its final
+form, and one that holds a piece of 6 characters of the key (or of one of
+its encoded forms) is replaced by a fixed fallback. The outputs are the tool
+list, every tool result as a whole (outer fields such as `isError`
+included), audit records and stderr lines, and construction errors. A result becomes a fixed
+"withheld" error, an audit record or line becomes a fixed one, and a
+construction error becomes the fixed refusal. Every error a gateway throws is a fresh error in final form: no `cause`, a `stack` of only `name: message` (no frames, paths or function names), and name, message and stack masked against the secret. The fallbacks are a small,
+closed set (`src/fallbacks.ts`), and a key that shares a piece with any of
+them, or with the tool list, is refused when the gateway is created.
+
+**Key admission.** Every key is a secret the vendor issues. A gateway
+accepts only printable ASCII (0x21-0x7E) of at least 16 characters, checked
+before anything is built from the key. As a cheap first filter it also
+refuses a key that shares a piece of 6 characters with a string literal in
+`src/` (`src/fixed-corpus.generated.ts`, kept up to date by a test). The
+refusal is a fixed text that never repeats the key. The standalone MCP server applies the same redaction to errors
+and audit records on a best-effort basis; its successful results are passed
+on as the API returned them.
+
 ## Security model
 
 - **One shared identity.** Every caller acts with the rights of the configured API key. Give it the least rights that work and rotate it regularly.
@@ -144,7 +200,7 @@ const result = await gateway.callTool('get_item', { itemId: 'i1' }, { caller: 'u
 - **Tool access is not data access.** A gateway controls who may call which tool; every permitted caller still sees everything the API key can see. To separate data, run several instances with different keys.
 - **Writes are off by default.** Write tools are annotated as destructive so clients can ask for confirmation. Read-only tools get a client that refuses non-GET requests. When `EXAMPLE_AUDIT_LOG` is set, a write tool does not run unless its start record is written; without it there is no audit record.
 - **Upstream content is untrusted input.** Data returned by the API may be written by anyone with access to it. Tool results label it as data; clients that combine this server with other tools should treat it accordingly.
-- **The API key stays on the API origin.** Redirects are never followed, the base URL must use `https`, and error messages and audit records are redacted (by each instance, with that instance's key) and size-capped.
+- **The API key stays on the API origin.** Redirects are never followed, the base URL must use `https`, and error messages and audit records are redacted (by each instance, with that instance's key) and size-capped. See the threat model above for what is and is not guaranteed.
 - **The HTTP transport fails closed.** It refuses to start on a non-loopback address or with any origin allowed unless a token is set, compares tokens in constant time, throttles failed authentication per client address, checks `Origin` and `Host` (DNS rebinding), and caps request bodies.
 
 Report vulnerabilities as described in [SECURITY.md](SECURITY.md).

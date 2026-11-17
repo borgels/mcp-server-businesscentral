@@ -60,11 +60,11 @@ function heldFetch() {
 
 describe('audit records', () => {
   it('are never written with a key the redactor cannot protect: a short key is refused', () => {
-    for (const apiKey of ['abc123', 'k', '1234567']) {
-      expect(() => createExampleGateway({ apiKey, baseUrl: BASE, policy: {} }), apiKey).toThrow(/at least 8 characters/);
-      expect(() => createExampleGateway({ apiKey, baseUrl: BASE }), apiKey).toThrow(/at least 8 characters/);
+    for (const apiKey of ['abc123', 'k', '1234567', '123456789012345']) {
+      expect(() => createExampleGateway({ apiKey, baseUrl: BASE, policy: {} }), apiKey).toThrow(/key was refused/);
+      expect(() => createExampleGateway({ apiKey, baseUrl: BASE }), apiKey).toThrow(/key was refused/);
     }
-    expect(() => createExampleGateway({ apiKey: '12345678', baseUrl: BASE, policy: {} })).not.toThrow();
+    expect(() => createExampleGateway({ apiKey: '1234567890123456', baseUrl: BASE, policy: {} })).not.toThrow();
   });
 
   it('keep the instance key out, refusals, input and metadata included', async () => {
@@ -87,7 +87,7 @@ describe('audit records', () => {
     expect(text).not.toContain(LONG_KEY);
     // Not even a part of it.
     expect(text).not.toContain('k'.repeat(40));
-    expect(text).toContain('[REDACTED]');
+    expect(text).toContain('‹redacted›');
   });
 });
 
@@ -196,7 +196,7 @@ describe('call scopes', () => {
     expect((await a.callTool('get_item', { itemId: 'i1' })).isError).toBeUndefined();
     expect(created.map(c => c.where).sort()).toEqual(['fetch', 'sink']);
     for (const c of created) {
-      expect(String(c.error), c.where).toMatch(/EXAMPLE_DISABLED_TOOLS names unknown tools: example_no_such_tool/);
+      expect(String(c.error), c.where).toMatch(/EXAMPLE_DISABLED_TOOLS names 1 unknown tool/);
     }
   });
 

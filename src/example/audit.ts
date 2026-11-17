@@ -2,7 +2,9 @@ import { createHash, randomUUID } from 'node:crypto';
 import { accessSync, constants, statSync } from 'node:fs';
 import { appendFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
-import { ExampleHttpError, formatUnknownError, type SecretRedactor } from '../errors.js';
+import { ExampleHttpError, formatUnknownError, redactDeep, redactSecrets, type SecretRedactor } from '../errors.js';
+import { STDERR_WITHHELD, withheldAuditRecord } from '../fallbacks.js';
+import { leaksSecret } from '../key-admission.js';
 import { ConfigError, readEnvString } from '../config-env.js';
 import { currentInstancePolicy, currentRedactor } from './policy.js';
 
@@ -23,18 +25,17 @@ export interface AuditEvent {
 const MAX_AUDIT_MESSAGE_LENGTH = 200;
 
 /**
- * Error summary for the audit log: HTTP status, error code and a short
- * redacted message. Response bodies are never logged in full, since APIs
- * often echo input (names, e-mail addresses) in error text.
+ * Error summary for the audit log: the HTTP status, or this server's own
+ * message, redacted before it is shortened. Nothing the upstream controls
+ * (body, error code, message) is logged: it can quote input or part of the key.
  */
 export function auditErrorSummary(
   error: unknown,
   redactor?: SecretRedactor,
-): { httpStatus?: number; errorCode?: string; message: string } {
+): { httpStatus?: number; message: string } {
   if (error instanceof ExampleHttpError) {
     return {
       httpStatus: error.status,
-      errorCode: error.errorCode?.slice(0, 50),
       message: `Example API request failed with HTTP ${error.status}`,
     };
   }
@@ -62,7 +63,7 @@ export function assertAuditLogWritable(): void {
     const existing = statSync(auditPath, { throwIfNoEntry: false });
     accessSync(existing ? auditPath : dirname(auditPath), constants.W_OK);
   } catch {
-    throw new ConfigError(`EXAMPLE_AUDIT_LOG is not writable: ${auditPath}`);
+    throw new ConfigError('EXAMPLE_AUDIT_LOG is not writable.');
   }
 }
 
@@ -88,6 +89,11 @@ export async function writeAuditEvent(
   if (!sink && !auditPath) {
     return;
   }
+  // One redactor for the record and for every failure message: the caller's, else the call scope's.
+  const redactor = options.redactor ?? currentRedactor();
+  // The sink check (src/key-admission.ts), on each record and line in its final form.
+  const leaks = (value: unknown) => redactor !== undefined && leaksSecret(value, redactor);
+  const stderrLine = (line: string) => process.stderr.write(`${leaks(line) ? STDERR_WITHHELD : line}\n`);
 
   try {
     const record = {
@@ -100,47 +106,34 @@ export async function writeAuditEvent(
       status: event.status,
       durationMs: event.durationMs,
       reason: event.reason,
-      ...(event.error === undefined ? {} : errorFields(auditErrorSummary(event.error, options.redactor))),
+      ...(event.error === undefined ? {} : errorFields(auditErrorSummary(event.error, redactor))),
     };
 
-    // Every string in the record, keys included, with the instance's secrets redacted: a key can reach the
-    // record through a tool name, an input field, the caller or a reason, not only through an error.
-    const redactor = options.redactor ?? currentRedactor();
-    const safe = redactor ? (redactDeep(record, redactor) as Record<string, unknown>) : record;
+    // Every value in the record, keys and numbers included, with the instance's secrets redacted (the shared
+    // redactDeep): a key can reach the record through a tool name, an input field, the caller or a reason.
+    const safe = redactDeep(record, redactor) as Record<string, unknown>;
     if (sink) {
       // A copy through JSON: the sink gets plain data, not an object the server keeps.
-      await sink(JSON.parse(JSON.stringify(safe)) as Record<string, unknown>);
+      const copy = JSON.parse(JSON.stringify(safe)) as Record<string, unknown>;
+      await sink(leaks(copy) ? withheldAuditRecord() : copy);
     } else if (auditPath) {
-      await appendFile(auditPath, `${JSON.stringify(safe)}\n`, 'utf8');
+      const line = JSON.stringify(safe);
+      await appendFile(auditPath, `${leaks(line) ? JSON.stringify(withheldAuditRecord()) : line}\n`, 'utf8');
     }
   } catch (error) {
     if (options.required) {
       // Details (path, OS error) go to stderr only, not to the caller.
-      process.stderr.write(`[example-mcp] audit log write failed, refusing ${event.tool}: ${formatUnknownError(error, options.redactor)}\n`);
-      throw new Error(`Audit log is not writable on this instance; ${event.tool} was not run.`);
+      const tool = formatUnknownError(event.tool, redactor);
+      // The whole line, prefix included, through the redactor and then the sink check.
+      stderrLine(redactSecrets(`[example-mcp] audit log write failed, refusing ${tool}: ${formatUnknownError(error, redactor)}`, redactor));
+      throw new Error(`Audit log is not writable on this instance; ${tool} was not run.`);
     }
-    process.stderr.write(`[example-mcp] audit log write failed: ${formatUnknownError(error, options.redactor)}\n`);
+    stderrLine(redactSecrets(`[example-mcp] audit log write failed: ${formatUnknownError(error, redactor)}`, redactor));
   }
-}
-
-/** A copy of a JSON value with every string, object keys included, redacted. */
-export function redactDeep(value: unknown, redactor: SecretRedactor): unknown {
-  if (typeof value === 'string') {
-    return redactor.redact(value);
-  }
-  if (Array.isArray(value)) {
-    return value.map(entry => redactDeep(entry, redactor));
-  }
-  if (value && typeof value === 'object') {
-    return Object.fromEntries(
-      Object.entries(value).map(([key, entry]) => [redactor.redact(key), redactDeep(entry, redactor)]),
-    );
-  }
-  return value;
 }
 
 function errorFields(summary: ReturnType<typeof auditErrorSummary>) {
-  return { httpStatus: summary.httpStatus, errorCode: summary.errorCode, error: summary.message };
+  return { httpStatus: summary.httpStatus, error: summary.message };
 }
 
 /** Identifier fields logged in clear text: they are opaque ids, not secrets. Extend per tool. */

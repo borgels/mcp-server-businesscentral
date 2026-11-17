@@ -28,9 +28,10 @@ afterEach(() => {
 
 /** Placeholder credentials, built at runtime: long enough to be redacted by value. */
 const fakeKey = (label: string) => `${label}-${'x'.repeat(12)}`;
-const KEY_A = fakeKey('tenant-a');
-const KEY_B = fakeKey('tenant-b');
-const ENV_KEY = fakeKey('from-env');
+// Keys with no piece of six characters in common: the redactor also removes any such piece of its own key.
+const KEY_A = 'alpha-0123456789-kq';
+const KEY_B = 'bravo-zyxwvutsrq-MP';
+const ENV_KEY = 'envkey-ABCDEFGHIJ-77';
 
 /** Upstream that answers every request with an error body echoing `echo`. */
 function echoingFetch(echo: string) {
@@ -95,9 +96,8 @@ describe('per-instance redaction', () => {
 
     const resultA = texts(await a.callTool('get_item', { itemId: 'i1' })).join(' ');
     const resultB = texts(await b.callTool('get_item', { itemId: 'i1' })).join(' ');
-    expect(resultA).toContain('[REDACTED]');
+    // The echoing error body is never read into the result; the key is not there in any form.
     expect(resultA).not.toContain(KEY_A);
-    expect(resultB).toContain('[REDACTED]');
     expect(resultB).not.toContain(KEY_B);
   });
 
@@ -109,7 +109,7 @@ describe('per-instance redaction', () => {
     expect(b.redactor.hasSecret(KEY_B)).toBe(true);
     expect(b.redactor.hasSecret(KEY_A)).toBe(false);
     // B neither knows nor needs A's key: its text is only redacted for its own.
-    expect(b.redactor.redact(`a=${KEY_A} b ${KEY_B}`)).toBe(`a=${KEY_A} b [REDACTED]`);
+    expect(b.redactor.redact(`a=${KEY_A} b ${KEY_B}`)).toBe(`a=${KEY_A} b ‹redacted›`);
   });
 
   it('does not accumulate keys of earlier instances', () => {
@@ -133,9 +133,6 @@ describe('per-instance redaction', () => {
 
     const errors = auditLines(process.env.EXAMPLE_AUDIT_LOG).filter(line => line.action === 'error');
     expect(errors.map(line => line.requestId)).toEqual(['a', 'b']);
-    for (const line of errors) {
-      expect(String(line.error)).toContain('[REDACTED]');
-    }
     const log = JSON.stringify(errors);
     expect(log).not.toContain(KEY_A);
     expect(log).not.toContain(KEY_B);

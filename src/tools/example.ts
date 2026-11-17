@@ -10,7 +10,7 @@ import { assertAuditLogWritable, auditTarget, newRequestId, writeAuditEvent } fr
 import { readOnlyClient, type UpstreamClient } from '../example/client.js';
 import { formatUnknownError, type SecretRedactor } from '../errors.js';
 import { createItem, getItem } from '../example/items.js';
-import { checkInputPolicy, checkToolPolicy, isToolDisabled, redactInScope, validatePolicyConfig } from '../example/policy.js';
+import { checkInputPolicy, checkToolPolicy, isToolDisabled, redactInScope, runInCallScope, validatePolicyConfig } from '../example/policy.js';
 
 const MAX_ID_LENGTH = 200;
 const idSchema = z.string().trim().min(1).max(MAX_ID_LENGTH);
@@ -82,14 +82,18 @@ export const EXAMPLE_TOOLS: ToolDefinition[] = [
   defineTool({
     name: 'example_get_item',
     title: 'Get Item (Example)',
-    description: 'Fetch one item by id.',
+    description: 'Fetch one item by id, optionally with its history.',
     inputShape: {
       itemId: idSchema.describe('Item id.'),
+      includeHistory: z.boolean().optional().describe('Also read the item history. A failed history read is reported in the result.'),
     },
     annotations: READ_TOOL_ANNOTATIONS,
     returnsUpstreamContent: true,
     summary: 'Fetched item.',
-    upstream: [{ access: 'read', method: 'GET', path: '/items/{itemId}' }],
+    upstream: [
+      { access: 'read', method: 'GET', path: '/items/{itemId}' },
+      { access: 'read', method: 'GET', path: '/items/{itemId}/history' },
+    ],
     handler: async (client, input) => getItem(client, input),
   }),
   defineTool({
@@ -147,7 +151,8 @@ export function registerTools(server: McpServer, client: RedactingClient): void 
       },
       async (input: Record<string, unknown>) => {
         try {
-          return mcpToolResult(tool, await executeTool(tool, client, input));
+          // In a scope with this server's redactor, like a gateway call: audit records and context are redacted.
+          return mcpToolResult(tool, await runInCallScope({ redactor: client.redactor }, () => executeTool(tool, client, input)));
         } catch (error) {
           // Central redaction with this instance's secrets: no error text reaches the client unredacted.
           return {
@@ -203,7 +208,10 @@ export async function executeTool(
   const policy = checkToolPolicy(tool.name, tool.annotations.readOnlyHint);
   const inputPolicy = policy.allowed ? checkInputPolicy(tool.name, input) : policy;
   if (!inputPolicy.allowed) {
-    await writeAuditEvent({ requestId, tool: tool.name, caller, action: 'policy_denied', target, reason: inputPolicy.reason });
+    await writeAuditEvent(
+      { requestId, tool: tool.name, caller, action: 'policy_denied', target, reason: inputPolicy.reason },
+      { redactor },
+    );
     throw new Error(inputPolicy.reason);
   }
 
@@ -225,7 +233,7 @@ export async function executeTool(
       target,
       status: 'ok',
       durationMs: Math.round(performance.now() - startedAt),
-    });
+    }, { redactor });
     return result;
   } catch (error) {
     await writeAuditEvent({

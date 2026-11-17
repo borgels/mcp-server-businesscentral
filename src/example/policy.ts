@@ -76,9 +76,10 @@ export function resolveInstancePolicy(policy: InstancePolicy, knownTools: readon
   }
   const known = new Set(knownTools);
   const disabled = new Set<string>();
-  for (const name of policy.disabledTools ?? []) {
+  for (const [index, name] of (policy.disabledTools ?? []).entries()) {
     if (typeof name !== 'string' || !known.has(canonicalToolName(name))) {
-      throw new ConfigError(`policy.disabledTools names an unknown tool: ${String(name).slice(0, 100)}`);
+      // The value is not quoted: a configuration value is never echoed, not even shortened.
+      throw new ConfigError(`policy.disabledTools[${index}] is not a known tool.`);
     }
     disabled.add(canonicalToolName(name));
   }
@@ -157,7 +158,8 @@ export function validatePolicyConfig(knownTools: readonly string[]): void {
   const known = new Set(knownTools);
   const unknown = [...disabledTools()].filter(name => !known.has(name));
   if (unknown.length > 0) {
-    throw new ConfigError(`EXAMPLE_DISABLED_TOOLS names unknown tools: ${unknown.join(', ')}`);
+    // The names are not quoted: a configuration value is never echoed, not even shortened.
+    throw new ConfigError(`EXAMPLE_DISABLED_TOOLS names ${unknown.length} unknown tool(s).`);
   }
 }
 

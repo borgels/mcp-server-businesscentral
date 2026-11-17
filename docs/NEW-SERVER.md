@@ -39,10 +39,76 @@ Check that `mcp-server-<name>` is free on npm (`npm view mcp-server-<name>` shou
 The `./gateway` export is built for hosts that run several tenants in one process. Keep these properties when adapting it:
 
 - `create<Name>Gateway` requires every tenant-specific credential (the API key, and the base URL when it differs per tenant) as an option and throws when one is missing. The client reads omitted credentials from `credentialEnv`; the gateway passes `{}`, so it never falls back to the environment. A value with a fixed vendor default (for example a single API host) can keep the default.
-- The gateway refuses an `apiKey` shorter than `MIN_SECRET_LENGTH` (8): the redactor does not protect shorter values, so such a key could reach an error or an audit record as it is.
-- Redaction is per instance: pass the client's `redactor` to everything that formats errors or writes audit records for that instance, and do not add module-level secret registries.
+- The gateway admits a key only through `admitsKey` (`src/key-admission.ts`): printable ASCII, at least 16 characters, and (a cheap first filter) no piece of 6 characters shared with a string literal in `src/`; run `node scripts/fixed-corpus.mjs` after changing a text. The guarantee comes from the sink check: every output (tool list, whole results, audit records and lines, construction errors) passes `leaksSecret` in its final form and is replaced by a fixed fallback from `src/fallbacks.ts` when it holds a piece of the key. A new kind of output needs the same check, and a new fallback goes into `fixedOutputs()`.
+- Redaction is per instance: pass the client's `redactor` to everything that formats errors or writes audit records for that instance, and do not add module-level secret registries. The gateway redacts every result it returns, text and data, object keys included.
+- No upstream text in an error. `ExampleHttpError` carries the status, our own hint and a parsed Retry-After; the body is discarded unread, the vendor's code and message are not kept, a redirect's `Location` is not quoted, and a network error names only a system error code. Audit records get the HTTP status, never a vendor code. Keep it that way when you map the vendor's errors: choose our own text by status, or by a code from a fixed list you write down.
+- A failure kept inside a result that is otherwise returned (one part of a combined read, as `get_item` with `includeHistory`) goes in as `nestedFailureText(error)`: the HTTP status or a fixed text. A failure the API reports inside a successful body (`metadata.error`, `failures[].error`) goes through `nestedFailuresAsStatus`: map the vendor's documented fields.
+- An error thrown while reading a successful body is replaced by a fixed text (`readResponseBody`); only timeouts and dropped connections go on, and they are reported as transport errors.
+- Redact structured values before they are serialised (`redactDeep`, keys included, numbers and booleans by their string form, replaced by the string `"‹redacted›"` so the JSON stays valid); build any JSON text from the redacted data, after redaction. A serialised key is escaped and no longer matches.
+- The redactor removes the key, its URL- and JSON-encoded forms, and any piece of it of `FRAGMENT_LENGTH` (6) characters or more. Never cut a value short before it is redacted, and never echo a configuration value in an error (not even shortened): name the variable only.
+- `test/gateway-results.test.ts` proves this through every channel with one key that has a quote and a backslash. Keep it, and add a channel when you add one.
 - New tools appear in `<name>ToolCatalog` automatically; declare their `upstream` requests, and `broad: true` on a tool that can read more than its name says (a generic lookup by path or a raw query).
 - Instance policy (writes, disabled tools, audit, and any allowlist you add) comes from the host's `policy` option when it is given, through `runInCallScope` in `src/<name>/policy.ts` (every gateway call runs in a scope of its own, with or without a host policy): every policy function reads `currentInstancePolicy()` first and the environment only outside a host policy. Add new policy settings to `InstancePolicy` and `resolveInstancePolicy` as well as to the environment. Limits stay process-wide and environment-based.
+
+## 4a. Threat model (keep it, adapt the names)
+
+What this server guarantees about the API key, and what it does not. It is
+the yardstick for every change that touches errors, results or audit.
+
+**Scope.** Guarantees (a), (b) and (c) apply to the embeddable gateway
+(`./gateway`), the surface a multi-tenant host uses. The standalone MCP
+server, configured from the environment for one key, keeps best-effort
+redaction: its errors and audit records are redacted with its key, but it is
+not held to these guarantees.
+
+**Guaranteed:**
+
+- **(a) The key never reaches anything persisted or shared:** audit sinks and
+  the audit log file, logs, error texts, export hooks or files. Errors are
+  our own texts; audit records and everything a gateway instance returns are
+  redacted with the instance's own key before they leave it.
+- **(b) No vendor-controlled free text in errors.** An error carries our own
+  fixed text, the HTTP status, numbers we parse (Retry-After), and codes from
+  a fixed list we wrote down; never a response body, a vendor message or
+  code, a redirect's `Location`, a type or field name from the vendor, or
+  the message of an error thrown while reading a response. A failure kept
+  inside an otherwise returned result is the status or a fixed text as well.
+  Errors never quote a configuration value.
+- **(c) Results go only to the tenant whose key it is.** One gateway
+  instance per tenant; every call runs in a scope of its own; nothing about a
+  tenant is kept in process-wide state. The MCP server serves one key.
+
+**Not guaranteed (residual risk):** a vendor that deliberately echoes the
+customer's own key back in data. Results are redacted on a best-effort
+basis: the exact key, its URL- and JSON-encoded forms and any piece of it of
+6 characters or more, in strings, object keys and the string form of
+numbers and booleans, are replaced by `"‹redacted›"` before anything is
+serialised. A key that comes back otherwise transformed (split into pieces
+shorter than 6 characters, reversed, re-encoded, hashed) is not recognised.
+Such data reaches only the tenant whose key it is, which already holds the
+key.
+
+**What leaves a gateway holds no piece of the key.** This is checked at
+the sink, not inferred from our texts: every output is checked in its final
+form, and one that holds a piece of 6 characters of the key (or of one of
+its encoded forms) is replaced by a fixed fallback. The outputs are the tool
+list, every tool result as a whole (outer fields such as `isError`
+included), audit records and stderr lines, and construction errors. A result becomes a fixed
+"withheld" error, an audit record or line becomes a fixed one, and a
+construction error becomes the fixed refusal. Every error a gateway throws is a fresh error in final form: no `cause`, a `stack` of only `name: message` (no frames, paths or function names), and name, message and stack masked against the secret. The fallbacks are a small,
+closed set (`src/fallbacks.ts`), and a key that shares a piece with any of
+them, or with the tool list, is refused when the gateway is created.
+
+**Key admission.** Every key is a secret the vendor issues. A gateway
+accepts only printable ASCII (0x21-0x7E) of at least 16 characters, checked
+before anything is built from the key. As a cheap first filter it also
+refuses a key that shares a piece of 6 characters with a string literal in
+`src/` (`src/fixed-corpus.generated.ts`, kept up to date by a test). The
+refusal is a fixed text that never repeats the key.
+
+The standalone MCP server applies the same redaction to errors
+and audit records on a best-effort basis; its successful results are passed
+on as the API returned them.
 
 ## 5. Container image
 

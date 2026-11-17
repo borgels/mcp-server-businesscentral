@@ -90,7 +90,7 @@ describe('MCP tool surface', () => {
   it('refuses an unwritable audit log path at startup, but not per server instance', async () => {
     process.env.EXAMPLE_AUDIT_LOG = join(dir, 'missing-dir', 'audit.jsonl');
     expect(() => validateStartupConfig()).toThrow('EXAMPLE_AUDIT_LOG');
-    expect(() => createExampleGateway({ apiKey: 'test-api-key', baseUrl: BASE })).toThrow('EXAMPLE_AUDIT_LOG');
+    expect(() => createExampleGateway({ apiKey: 'tttt-gggg-wwww-vvvv-1', baseUrl: BASE })).toThrow('EXAMPLE_AUDIT_LOG');
 
     // The HTTP transport creates a server per request: read tools keep working.
     const { mcpClient } = await connect({ [`GET ${BASE}/items/i1`]: { body: item } });
@@ -157,7 +157,7 @@ describe('write gate beyond annotations', () => {
       const result = await mcpClient.callTool({ name: 'example_get_item', arguments: { itemId: 'i1' } });
       expect(result.isError).toBe(true);
       const text = texts(result).join(' ');
-      expect(text).toContain('[REDACTED]');
+      expect(text).toContain('‹redacted›');
       for (const secret of ['test-api-key', 'other-secret', 'third-secret']) {
         expect(text).not.toContain(secret);
       }

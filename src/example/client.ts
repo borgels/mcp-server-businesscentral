@@ -1,12 +1,5 @@
 import { ConfigError, readEnvBoolean, readEnvInteger, readEnvString, type Env } from '../config-env.js';
-import {
-  ExampleHttpError,
-  describeUrl,
-  formatUnknownError,
-  parseRetryAfterMs,
-  redactSecrets,
-  SecretRedactor,
-} from '../errors.js';
+import { ExampleHttpError, describeUrl, parseRetryAfterMs, SecretRedactor } from '../errors.js';
 import { USER_AGENT } from '../version.js';
 
 export interface ExampleClientOptions {
@@ -61,11 +54,31 @@ export const DEFAULT_MAX_RESPONSE_BYTES = 10 * 1024 * 1024;
 const MAX_RESPONSE_BYTES_LIMIT = 100 * 1024 * 1024;
 
 const RETRYABLE_STATUS = new Set([429, 502, 503, 504]);
-/** Error bodies are only read up to this size. */
-const MAX_ERROR_BODY_BYTES = 64 * 1024;
 /** Largest delay accepted by Node timers. */
 const MAX_TIMER_MS = 2_147_483_647;
 /** Error codes (on `error.cause`) of connection-level failures worth retrying. */
+/** System error codes a network error may name: a fixed list, so no other text from a cause is ever shown. */
+const SHOWN_NETWORK_CODES: ReadonlySet<string> = new Set([
+  'ECONNRESET',
+  'ECONNREFUSED',
+  'ECONNABORTED',
+  'ETIMEDOUT',
+  'EPIPE',
+  'EAI_AGAIN',
+  'ENOTFOUND',
+  'EHOSTUNREACH',
+  'ENETUNREACH',
+  'UND_ERR_CONNECT_TIMEOUT',
+  'UND_ERR_HEADERS_TIMEOUT',
+  'UND_ERR_BODY_TIMEOUT',
+  'UND_ERR_SOCKET',
+  'CERT_HAS_EXPIRED',
+  'DEPTH_ZERO_SELF_SIGNED_CERT',
+  'SELF_SIGNED_CERT_IN_CHAIN',
+  'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+  'ERR_TLS_CERT_ALTNAME_INVALID',
+]);
+
 const TRANSIENT_NETWORK_CODES = new Set([
   'ECONNRESET',
   'ECONNREFUSED',
@@ -221,13 +234,12 @@ export class ExampleClient implements UpstreamClient {
       }
 
       if (!response.ok) {
-        const payload = await readErrorBody(response);
+        // The body is the vendor's text: it is never read into an error, a result or an audit record.
+        await discardBody(response);
         throw new ExampleHttpError({
           status: response.status,
           url: describeUrl(url),
-          payload,
           retryAfter: response.headers.get('retry-after') ?? undefined,
-          redactor: this.redactor,
         });
       }
 
@@ -310,14 +322,15 @@ export class ExampleClient implements UpstreamClient {
     return slept + delay > this.retryBudgetMs ? undefined : delay;
   }
 
-  private transportError(method: HttpMethod, url: string, error: unknown): Error {
-    const target = describeUrl(url);
+  // Our own words with the method only: the address is configuration and is not quoted.
+  private transportError(method: HttpMethod, _url: string, error: unknown): Error {
     if (isTimeoutError(error)) {
-      return new Error(this.redactor.redact(`Example API request timed out after ${this.timeoutMs} ms (${method} ${target}).`));
+      return new Error(this.redactor.redact(`Example API request timed out after ${this.timeoutMs} ms (${method}).`));
     }
-    const cause = error instanceof Error && error.cause !== undefined ? formatUnknownError(error.cause, this.redactor) : undefined;
-    const message = `Network error calling the Example API (${method} ${target}): ${formatUnknownError(error, this.redactor)}${cause ? ` (cause: ${cause})` : ''}`;
-    return new Error(this.redactor.redact(message), { cause: error });
+    // Only a system error code (ECONNREFUSED, ENOTFOUND, ...) from the cause, never its message.
+    const code = (error instanceof Error ? (error.cause as { code?: unknown } | undefined)?.code : undefined) ?? undefined;
+    const shown = typeof code === 'string' && SHOWN_NETWORK_CODES.has(code) ? ` (${code})` : '';
+    return new Error(this.redactor.redact(`Network error calling the Example API (${method})${shown}.`), { cause: error });
   }
 }
 
@@ -332,7 +345,8 @@ function intOption(
 ): number {
   if (value !== undefined) {
     if (!Number.isSafeInteger(value) || value < min || value > max) {
-      throw new ConfigError(`${optionName} must be an integer between ${min} and ${max}; got ${String(value)}.`);
+      // The value is not quoted: an option may hold a secret put there by mistake.
+      throw new ConfigError(`${optionName} must be an integer between ${min} and ${max}.`);
     }
     return value;
   }
@@ -371,20 +385,11 @@ function isRedirect(status: number): boolean {
   return status >= 300 && status < 400;
 }
 
-function redirectRefusedMessage(response: Response, method: HttpMethod, url: string): string {
-  const location = response.headers.get('location');
-  let target: string | undefined;
-  if (location) {
-    try {
-      target = describeUrl(new URL(location, url));
-    } catch {
-      target = undefined;
-    }
-  }
-  const where = target ? ` to ${target}` : '';
-  const advice = target ? ' If that host is the correct API host, set EXAMPLE_BASE_URL to it.' : '';
-  return redactSecrets(
-    `Example API responded with a redirect (HTTP ${response.status})${where} for ${method} ${describeUrl(url)}; redirects are not followed.${advice}`,
+/** The redirect's Location is the vendor's text and is never quoted; only the status and our own request. */
+function redirectRefusedMessage(response: Response, method: HttpMethod, _url: string): string {
+  return (
+    `Example API responded with a redirect (HTTP ${response.status}) for ${method}; ` +
+    'redirects are not followed. Check EXAMPLE_BASE_URL.'
   );
 }
 
@@ -459,24 +464,6 @@ async function discardBody(response: Response): Promise<void> {
   }
 }
 
-/** Error bodies are read up to a small limit; JSON is parsed only when complete. */
-async function readErrorBody(response: Response): Promise<unknown> {
-  const { bytes, exceeded } = await readUpTo(response, MAX_ERROR_BODY_BYTES);
-  const text = new TextDecoder().decode(bytes);
-  if (!text) {
-    return null;
-  }
-  const contentType = response.headers.get('content-type') ?? '';
-  if (!exceeded && contentType.includes('application/json')) {
-    try {
-      return JSON.parse(text) as unknown;
-    } catch {
-      return text;
-    }
-  }
-  return text;
-}
-
 /** Successful bodies are read up to maxBytes; a larger response is an error, not a truncated result. */
 async function readResponseBody(response: Response, maxBytes: number): Promise<unknown> {
   const declared = Number(response.headers.get('content-length') ?? 0);
@@ -484,7 +471,18 @@ async function readResponseBody(response: Response, maxBytes: number): Promise<u
     await discardBody(response);
     throw new Error(`Example API response of ${declared} bytes exceeds the ${maxBytes} byte limit (EXAMPLE_MAX_RESPONSE_BYTES).`);
   }
-  const { bytes, exceeded } = await readUpTo(response, maxBytes);
+  let read: { bytes: Uint8Array; exceeded: boolean };
+  try {
+    read = await readUpTo(response, maxBytes);
+  } catch (error) {
+    // A timeout or a dropped connection goes on to execute(), which reports it as a transport error. Anything else
+    // thrown while reading the body is replaced by a fixed text: its message is not ours.
+    if (isTimeoutError(error) || isTransientNetworkError(error)) {
+      throw error;
+    }
+    throw new Error('The Example API response could not be read.');
+  }
+  const { bytes, exceeded } = read;
   if (exceeded) {
     throw new Error(`Example API response exceeds the ${maxBytes} byte limit (EXAMPLE_MAX_RESPONSE_BYTES).`);
   }
@@ -529,7 +527,8 @@ function assertSafeBaseUrl(baseUrl: string, allowCustomHost: boolean): void {
 
   if (parsed.protocol !== 'https:') {
     throw new ConfigError(
-      `Refusing to send the API key over ${parsed.protocol}//. Use https:// (loopback http:// is allowed for local mocks).`,
+      // The scheme is not quoted: it is part of a configuration value.
+      'Refusing to send the API key over a scheme other than https://. Use https:// (loopback http:// is allowed for local mocks).',
     );
   }
 
@@ -542,8 +541,9 @@ function assertSafeBaseUrl(baseUrl: string, allowCustomHost: boolean): void {
     return;
   }
 
+  // The host is not quoted: it is a configuration value.
   throw new ConfigError(
-    `Refusing to send the API key to ${host}: EXAMPLE_BASE_URL must be on ${UPSTREAM_HOST_SUFFIXES.join(', ')}. ` +
+    `Refusing to send the API key to that host: EXAMPLE_BASE_URL must be on ${UPSTREAM_HOST_SUFFIXES.join(', ')}. ` +
       'Set EXAMPLE_ALLOW_CUSTOM_BASE_URL=true to allow another host.',
   );
 }

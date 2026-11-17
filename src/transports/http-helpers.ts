@@ -106,7 +106,8 @@ export function assertSecureConfig(config: HttpConfig): void {
 
   if (!isLoopbackHost(config.host)) {
     throw new ConfigError(
-      `Refusing to listen on ${config.host} (from MCP_HTTP_HOST or HOST) without MCP_HTTP_TOKEN: anyone who can reach this address ` +
+      // The address is not quoted: it is a configuration value.
+      'Refusing to listen on a non-loopback address (from MCP_HTTP_HOST or HOST) without MCP_HTTP_TOKEN: anyone who can reach this address ' +
         'could use the upstream API credentials. Set MCP_HTTP_TOKEN, bind to 127.0.0.1, or set ' +
         'MCP_HTTP_ALLOW_UNAUTHENTICATED=true if access is restricted by other means.',
     );
@@ -218,7 +219,7 @@ export function normalizeAllowedHost(entry: string): string {
   const normalized = formatHostname(entry);
   if (!HOSTNAME_PATTERN.test(normalized)) {
     throw new ConfigError(
-      `MCP_ALLOWED_HOSTS entries must be host names without scheme, port or path; got ${JSON.stringify(entry)}.`,
+      'MCP_ALLOWED_HOSTS entries must be host names without scheme, port or path.',
     );
   }
   return normalized;

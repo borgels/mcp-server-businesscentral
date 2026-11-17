@@ -125,7 +125,7 @@ describe('instance policy from the host', () => {
   it('rejects an unclear policy when the instance is created', () => {
     const create = (policy: unknown) => () =>
       createExampleGateway({ apiKey: KEY, baseUrl: BASE, policy: policy as never });
-    expect(create({ disabledTools: ['no_such_tool'] })).toThrow(/unknown tool/);
+    expect(create({ disabledTools: ['no_such_tool'] })).toThrow(/is not a known tool/);
     expect(create({ enableWrites: 'yes' })).toThrow(/enableWrites/);
     expect(create({ audit: 'file.jsonl' })).toThrow(/audit/);
     expect(create(null)).toThrow(/policy/);
