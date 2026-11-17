@@ -10,7 +10,7 @@ import { assertAuditLogWritable, auditTarget, newRequestId, writeAuditEvent } fr
 import { readOnlyClient, type UpstreamClient } from '../example/client.js';
 import { formatUnknownError, type SecretRedactor } from '../errors.js';
 import { createItem, getItem } from '../example/items.js';
-import { checkInputPolicy, checkToolPolicy, isToolDisabled, validatePolicyConfig } from '../example/policy.js';
+import { checkInputPolicy, checkToolPolicy, isToolDisabled, redactInScope, validatePolicyConfig } from '../example/policy.js';
 
 const MAX_ID_LENGTH = 200;
 const idSchema = z.string().trim().min(1).max(MAX_ID_LENGTH);
@@ -53,6 +53,13 @@ export interface ToolDefinition<S extends z.ZodRawShape = z.ZodRawShape> {
   summary: string;
   /** Every upstream request the handler may make. */
   upstream: readonly UpstreamOperation[];
+  /**
+   * True when the tool can read more than its name says: anything in the
+   * system, chosen by the input (a generic get-by-path, a raw query).
+   * Published as `broad` in the gateway catalog, so a host that grants tools
+   * per role gives it only to roles that may read everything. Default false.
+   */
+  broad?: boolean;
   /**
    * Read-only tools (readOnlyHint) receive a client view that refuses
    * non-GET requests, so a mis-annotated tool cannot write.
@@ -165,7 +172,8 @@ function contextString(value: unknown, max: number): string | undefined {
   if (typeof value !== 'string') {
     return undefined;
   }
-  const trimmed = value.trim();
+  // Redacted before it is cut short: a cut key would no longer match the redactor.
+  const trimmed = redactInScope(value).trim();
   return trimmed ? trimmed.slice(0, max) : undefined;
 }
 
@@ -250,15 +258,15 @@ export async function auditRejectedCall(
       ? Object.keys(input)
           .sort()
           .slice(0, MAX_REJECTED_FIELDS)
-          .map(key => key.slice(0, MAX_REJECTED_FIELD_LENGTH))
+          .map(key => redactInScope(key).slice(0, MAX_REJECTED_FIELD_LENGTH))
       : [];
   await writeAuditEvent({
     requestId,
-    tool: toolName.slice(0, 100),
+    tool: redactInScope(toolName).slice(0, 100),
     caller,
     action: 'rejected',
     target: { fields },
-    reason: reason.slice(0, 200),
+    reason: redactInScope(reason).slice(0, 200),
   });
 }
 

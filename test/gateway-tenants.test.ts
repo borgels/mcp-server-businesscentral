@@ -183,7 +183,9 @@ describe('tool catalog', () => {
   it('lists every registered tool, matching the gateway definitions', async () => {
     expect(exampleToolCatalog.map(entry => entry.name)).toEqual(exampleGatewayTools.map(tool => tool.name));
     for (const entry of exampleToolCatalog) {
-      const { upstream, ...definition } = entry;
+      const { upstream, broad, ...definition } = entry;
+      expect(typeof broad).toBe('boolean');
+      if (broad) expect(entry.riskLevel).toBe('read');
       expect(definition).toEqual(exampleGatewayTools.find(tool => tool.name === entry.name));
       expect(upstream.length).toBeGreaterThan(0);
       for (const operation of upstream) {

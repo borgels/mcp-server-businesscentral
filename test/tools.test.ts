@@ -90,7 +90,7 @@ describe('MCP tool surface', () => {
   it('refuses an unwritable audit log path at startup, but not per server instance', async () => {
     process.env.EXAMPLE_AUDIT_LOG = join(dir, 'missing-dir', 'audit.jsonl');
     expect(() => validateStartupConfig()).toThrow('EXAMPLE_AUDIT_LOG');
-    expect(() => createExampleGateway({ apiKey: 'k', baseUrl: BASE })).toThrow('EXAMPLE_AUDIT_LOG');
+    expect(() => createExampleGateway({ apiKey: 'test-api-key', baseUrl: BASE })).toThrow('EXAMPLE_AUDIT_LOG');
 
     // The HTTP transport creates a server per request: read tools keep working.
     const { mcpClient } = await connect({ [`GET ${BASE}/items/i1`]: { body: item } });

@@ -39,9 +39,10 @@ Check that `mcp-server-<name>` is free on npm (`npm view mcp-server-<name>` shou
 The `./gateway` export is built for hosts that run several tenants in one process. Keep these properties when adapting it:
 
 - `create<Name>Gateway` requires every tenant-specific credential (the API key, and the base URL when it differs per tenant) as an option and throws when one is missing. The client reads omitted credentials from `credentialEnv`; the gateway passes `{}`, so it never falls back to the environment. A value with a fixed vendor default (for example a single API host) can keep the default.
+- The gateway refuses an `apiKey` shorter than `MIN_SECRET_LENGTH` (8): the redactor does not protect shorter values, so such a key could reach an error or an audit record as it is.
 - Redaction is per instance: pass the client's `redactor` to everything that formats errors or writes audit records for that instance, and do not add module-level secret registries.
-- New tools appear in `<name>ToolCatalog` automatically; declare their `upstream` requests.
-- Instance policy (writes, disabled tools, audit log) and limits stay process-wide and environment-based.
+- New tools appear in `<name>ToolCatalog` automatically; declare their `upstream` requests, and `broad: true` on a tool that can read more than its name says (a generic lookup by path or a raw query).
+- Instance policy (writes, disabled tools, audit, and any allowlist you add) comes from the host's `policy` option when it is given, through `runInCallScope` in `src/<name>/policy.ts` (every gateway call runs in a scope of its own, with or without a host policy): every policy function reads `currentInstancePolicy()` first and the environment only outside a host policy. Add new policy settings to `InstancePolicy` and `resolveInstancePolicy` as well as to the environment. Limits stay process-wide and environment-based.
 
 ## 5. Container image
 

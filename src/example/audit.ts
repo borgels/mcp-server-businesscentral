@@ -4,6 +4,7 @@ import { appendFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { ExampleHttpError, formatUnknownError, type SecretRedactor } from '../errors.js';
 import { ConfigError, readEnvString } from '../config-env.js';
+import { currentInstancePolicy, currentRedactor } from './policy.js';
 
 export interface AuditEvent {
   /** Shared by all events of one tool call (start/finish/error). */
@@ -66,7 +67,9 @@ export function assertAuditLogWritable(): void {
 }
 
 /**
- * Append one JSON line to EXAMPLE_AUDIT_LOG (no-op when unset).
+ * Append one JSON line to EXAMPLE_AUDIT_LOG (no-op when unset). Under a
+ * host's InstancePolicy the record goes to the policy's `audit` sink instead
+ * (no-op without one), and EXAMPLE_AUDIT_LOG is not read.
  *
  * By default a failing audit sink is reported on stderr and does not change
  * the tool result: after a call has run, surfacing an error would invite a
@@ -79,8 +82,10 @@ export async function writeAuditEvent(
   event: AuditEvent,
   options: { required?: boolean; redactor?: SecretRedactor } = {},
 ): Promise<void> {
-  const auditPath = readEnvString('EXAMPLE_AUDIT_LOG');
-  if (!auditPath) {
+  const hosted = currentInstancePolicy();
+  const sink = hosted?.audit;
+  const auditPath = hosted ? undefined : readEnvString('EXAMPLE_AUDIT_LOG');
+  if (!sink && !auditPath) {
     return;
   }
 
@@ -98,7 +103,16 @@ export async function writeAuditEvent(
       ...(event.error === undefined ? {} : errorFields(auditErrorSummary(event.error, options.redactor))),
     };
 
-    await appendFile(auditPath, `${JSON.stringify(record)}\n`, 'utf8');
+    // Every string in the record, keys included, with the instance's secrets redacted: a key can reach the
+    // record through a tool name, an input field, the caller or a reason, not only through an error.
+    const redactor = options.redactor ?? currentRedactor();
+    const safe = redactor ? (redactDeep(record, redactor) as Record<string, unknown>) : record;
+    if (sink) {
+      // A copy through JSON: the sink gets plain data, not an object the server keeps.
+      await sink(JSON.parse(JSON.stringify(safe)) as Record<string, unknown>);
+    } else if (auditPath) {
+      await appendFile(auditPath, `${JSON.stringify(safe)}\n`, 'utf8');
+    }
   } catch (error) {
     if (options.required) {
       // Details (path, OS error) go to stderr only, not to the caller.
@@ -107,6 +121,22 @@ export async function writeAuditEvent(
     }
     process.stderr.write(`[example-mcp] audit log write failed: ${formatUnknownError(error, options.redactor)}\n`);
   }
+}
+
+/** A copy of a JSON value with every string, object keys included, redacted. */
+export function redactDeep(value: unknown, redactor: SecretRedactor): unknown {
+  if (typeof value === 'string') {
+    return redactor.redact(value);
+  }
+  if (Array.isArray(value)) {
+    return value.map(entry => redactDeep(entry, redactor));
+  }
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, entry]) => [redactor.redact(key), redactDeep(entry, redactor)]),
+    );
+  }
+  return value;
 }
 
 function errorFields(summary: ReturnType<typeof auditErrorSummary>) {

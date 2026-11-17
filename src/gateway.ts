@@ -1,9 +1,15 @@
 import { z } from 'zod/v4';
 import { UNTRUSTED_CONTENT_NOTE } from './example/annotations.js';
 import { ExampleClient, type ExampleClientOptions } from './example/client.js';
-import { isToolDisabled, TOOL_PREFIX } from './example/policy.js';
+import {
+  isToolDisabled,
+  resolveInstancePolicy,
+  runInCallScope,
+  TOOL_PREFIX,
+  type InstancePolicy,
+} from './example/policy.js';
 import { ConfigError } from './config-env.js';
-import { formatUnknownError, type SecretRedactor } from './errors.js';
+import { formatUnknownError, MIN_SECRET_LENGTH, type SecretRedactor } from './errors.js';
 import {
   auditRejectedCall,
   EXAMPLE_TOOLS,
@@ -25,10 +31,18 @@ import {
  * Several gateway instances (for example one per tenant) can run in one
  * process. Each instance uses only the credentials passed to
  * createExampleGateway (never EXAMPLE_API_KEY or EXAMPLE_BASE_URL from the
- * environment) and redacts errors with its own secrets only. Instance policy
- * (EXAMPLE_ENABLE_WRITES, EXAMPLE_DISABLED_TOOLS, EXAMPLE_AUDIT_LOG) and
- * limits are still read from the environment and apply to every instance.
+ * environment) and redacts errors with its own secrets only.
+ *
+ * Instance policy (writes, disabled tools, audit) comes from the host when it
+ * passes `policy`: that instance then reads none of EXAMPLE_ENABLE_WRITES,
+ * EXAMPLE_DISABLED_TOOLS, EXAMPLE_AUDIT_LOG or EXAMPLE_ALLOW_CUSTOM_BASE_URL,
+ * so two tenants in one process can have different settings. Without
+ * `policy` the instance uses the environment, as the MCP server does. Limits
+ * (timeouts, retries) are still read from the environment and apply to every
+ * instance.
  */
+
+export type { AuditSink, InstancePolicy } from './example/policy.js';
 
 export type GatewayRiskLevel = 'read' | 'write' | 'destructive';
 export type GatewayJsonValue = string | number | boolean | null | GatewayJsonValue[] | { [key: string]: GatewayJsonValue };
@@ -72,6 +86,13 @@ export interface GatewayToolCatalogEntry {
   readonly enabledByDefault: boolean;
   readonly inputSchema: { readonly [key: string]: GatewayReadonlyJsonValue };
   readonly upstream: readonly GatewayUpstreamOperation[];
+  /**
+   * True when the tool can read more than its name says (anything in the
+   * system, chosen by the input). A host that grants tools per role gives a
+   * broad tool only to roles that may read everything. From the tool table
+   * (`broad`), false unless a tool declares it.
+   */
+  readonly broad: boolean;
 }
 
 export interface ExampleGatewayOptions extends Omit<ExampleClientOptions, 'apiKey' | 'baseUrl' | 'credentialEnv'> {
@@ -79,6 +100,12 @@ export interface ExampleGatewayOptions extends Omit<ExampleClientOptions, 'apiKe
   apiKey: string;
   /** API base URL of this instance. Required; never read from the environment. */
   baseUrl: string;
+  /**
+   * Instance policy from the host. When given, the instance reads no policy
+   * or audit variables from the environment (see InstancePolicy). A host
+   * serving several tenants should always pass it.
+   */
+  policy?: InstancePolicy;
 }
 
 /**
@@ -135,6 +162,7 @@ export const exampleToolCatalog: readonly GatewayToolCatalogEntry[] = deepFreeze
   EXAMPLE_TOOLS.map(tool => ({
     ...toGatewayDefinition(tool),
     upstream: tool.upstream.map(operation => ({ ...operation })),
+    broad: tool.broad === true,
   })),
 );
 
@@ -145,6 +173,11 @@ function requiredCredential(options: ExampleGatewayOptions, name: 'apiKey' | 'ba
       `createExampleGateway requires options.${name}. Embedded instances do not read credentials from the environment.`,
     );
   }
+  // The redactor only protects secrets of MIN_SECRET_LENGTH characters or more; a shorter key could reach an error
+  // or an audit record as it is. Refuse it instead of using it unprotected.
+  if (name === 'apiKey' && value.trim().length < MIN_SECRET_LENGTH) {
+    throw new ConfigError(`createExampleGateway requires an apiKey of at least ${MIN_SECRET_LENGTH} characters.`);
+  }
   return value.trim();
 }
 
@@ -153,44 +186,66 @@ function requiredCredential(options: ExampleGatewayOptions, name: 'apiKey' | 'ba
  * are the only credentials the instance uses; a missing value fails here.
  */
 export function createExampleGateway(options: ExampleGatewayOptions) {
-  validateStartupConfig();
   const apiKey = requiredCredential(options, 'apiKey');
   const baseUrl = requiredCredential(options, 'baseUrl');
-  const client = new ExampleClient({ ...options, apiKey, baseUrl, credentialEnv: {} });
+  const { policy: hostPolicy, ...clientOptions } = options;
+  const policy =
+    hostPolicy === undefined ? undefined : resolveInstancePolicy(hostPolicy, EXAMPLE_TOOLS.map(tool => tool.name));
+  if (policy === undefined) {
+    // In a scope of its own: a gateway created from inside another instance's call (its audit sink or its fetch)
+    // validates against the environment, never against that instance's policy.
+    runInCallScope({}, () => validateStartupConfig());
+  }
+  const client = new ExampleClient({
+    ...clientOptions,
+    apiKey,
+    baseUrl,
+    credentialEnv: {},
+    // Under a host's policy nothing is read from the environment, this switch included.
+    ...(policy ? { allowCustomBaseUrl: clientOptions.allowCustomBaseUrl ?? false } : {}),
+  });
   const redactor: SecretRedactor = client.redactor;
+  // Every call in a scope of its own, with or without a host policy: a call made from inside another
+  // instance's call (its audit sink or its fetch) never runs under that instance's policy, sink or redactor.
+  const underPolicy = <T>(work: () => T): T => runInCallScope(policy ? { policy, redactor } : { redactor }, work);
 
   return {
-    /** Tools enabled on this instance (EXAMPLE_DISABLED_TOOLS removes them). */
-    tools: exampleGatewayTools.filter(tool => !isToolDisabled(tool.name)),
-    async callTool(
-      toolName: string,
-      input: GatewayJsonObject = {},
-      context?: GatewayCallContext,
-    ): Promise<GatewayToolResult> {
-      try {
-        const name = typeof toolName === 'string' ? toolName.trim() : '';
-        const tool = name ? findTool(`${TOOL_PREFIX}${stripPrefix(name)}`) : undefined;
-        if (!tool) {
-          const reason = `Unsupported Example gateway tool: ${String(toolName).slice(0, 100)}`;
-          await auditRejectedCall(String(toolName), input, reason, context);
-          return errorResult(redactor.redact(reason));
-        }
-
-        const parsed = tool.inputSchema.safeParse(input ?? {});
-        if (!parsed.success) {
-          const reason = `Invalid input for ${name}: ${z.prettifyError(parsed.error)}`;
-          await auditRejectedCall(tool.name, input, 'invalid input', context);
-          return errorResult(redactor.redact(reason));
-        }
-
-        const data = await executeTool(tool, client, parsed.data as Record<string, unknown>, context ?? undefined);
-        const text = tool.returnsUpstreamContent ? `${tool.summary} ${UNTRUSTED_CONTENT_NOTE}` : tool.summary;
-        return jsonResult(text, data);
-      } catch (error) {
-        return errorResult(formatUnknownError(error, redactor));
-      }
+    /** Tools enabled on this instance (the policy's or EXAMPLE_DISABLED_TOOLS' disabled tools are left out). */
+    tools: underPolicy(() => exampleGatewayTools.filter(tool => !isToolDisabled(tool.name))),
+    callTool(toolName: string, input: GatewayJsonObject = {}, context?: GatewayCallContext): Promise<GatewayToolResult> {
+      return underPolicy(() => runCall(toolName, input, context));
     },
   };
+
+  async function runCall(
+    toolName: string,
+    input: GatewayJsonObject,
+    context: GatewayCallContext | undefined,
+  ): Promise<GatewayToolResult> {
+    try {
+      const name = typeof toolName === 'string' ? toolName.trim() : '';
+      const tool = name ? findTool(`${TOOL_PREFIX}${stripPrefix(name)}`) : undefined;
+      if (!tool) {
+        // Redacted before it is cut short: a cut key would no longer match the redactor.
+        const reason = `Unsupported Example gateway tool: ${redactor.redact(String(toolName)).slice(0, 100)}`;
+        await auditRejectedCall(String(toolName), input, reason, context);
+        return errorResult(redactor.redact(reason));
+      }
+
+      const parsed = tool.inputSchema.safeParse(input ?? {});
+      if (!parsed.success) {
+        const reason = `Invalid input for ${name}: ${z.prettifyError(parsed.error)}`;
+        await auditRejectedCall(tool.name, input, 'invalid input', context);
+        return errorResult(redactor.redact(reason));
+      }
+
+      const data = await executeTool(tool, client, parsed.data as Record<string, unknown>, context ?? undefined);
+      const text = tool.returnsUpstreamContent ? `${tool.summary} ${UNTRUSTED_CONTENT_NOTE}` : tool.summary;
+      return jsonResult(text, data);
+    } catch (error) {
+      return errorResult(formatUnknownError(error, redactor));
+    }
+  }
 }
 
 /** One gateway instance, as returned by createExampleGateway. */
