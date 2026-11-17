@@ -121,6 +121,22 @@ Configuration is read from the environment (see `.env.example`). Invalid numbers
 | `MCP_AUTH_FAILURE_LIMIT`, `MCP_AUTH_FAILURE_WINDOW_MS` | `20`, `60000` | Failed-authentication limit per client address; `0` disables it. |
 | `MCP_HTTP_ALLOW_UNAUTHENTICATED` | `false` | Permit a non-loopback bind without a token. Only for isolated networks. |
 
+## Embedding (`./gateway`)
+
+A host application can run the tools in-process instead of over MCP:
+
+```ts
+import { createExampleGateway, exampleToolCatalog } from '<npm-package>/gateway';
+
+const gateway = createExampleGateway({ apiKey: tenant.apiKey, baseUrl: tenant.baseUrl });
+const result = await gateway.callTool('get_item', { itemId: 'i1' }, { caller: 'user@example.test' });
+```
+
+- **Explicit credentials.** `apiKey` and `baseUrl` are required; a missing value throws when the gateway is created. A gateway never reads `EXAMPLE_API_KEY` or `EXAMPLE_BASE_URL` from the environment, so one tenant cannot silently fall back to the process's credentials. The stdio and HTTP transports still read them from the environment.
+- **Several tenants in one process.** Create one gateway per set of credentials. Each instance redacts error text, tool results and audit records with its own key only; no secret is kept in a process-wide registry, and a dropped instance releases its key.
+- **Shared instance policy.** `EXAMPLE_ENABLE_WRITES`, `EXAMPLE_DISABLED_TOOLS`, `EXAMPLE_AUDIT_LOG` and the limits (`EXAMPLE_TIMEOUT_MS`, ...) are read from the environment and apply to every gateway in the process. Per-user and per-tenant authorization is the host's job.
+- **Tool catalog.** `exampleToolCatalog` is a frozen list of every tool: `name` (without the `example_` prefix), `title`, `description`, `riskLevel` (`read`, `write` or `destructive`), `enabledByDefault`, `inputSchema` (JSON Schema) and `upstream`, the API requests the tool may make (`access`, `method` and path template). It is generated from the same tool table as the MCP server, so it cannot drift from the registered tools. `exampleGatewayTools` holds the same definitions without `upstream`; `gateway.tools` lists those enabled on the instance.
+
 ## Security model
 
 - **One shared identity.** Every caller acts with the rights of the configured API key. Give it the least rights that work and rotate it regularly.
@@ -128,7 +144,7 @@ Configuration is read from the environment (see `.env.example`). Invalid numbers
 - **Tool access is not data access.** A gateway controls who may call which tool; every permitted caller still sees everything the API key can see. To separate data, run several instances with different keys.
 - **Writes are off by default.** Write tools are annotated as destructive so clients can ask for confirmation. Read-only tools get a client that refuses non-GET requests. When `EXAMPLE_AUDIT_LOG` is set, a write tool does not run unless its start record is written; without it there is no audit record.
 - **Upstream content is untrusted input.** Data returned by the API may be written by anyone with access to it. Tool results label it as data; clients that combine this server with other tools should treat it accordingly.
-- **The API key stays on the API origin.** Redirects are never followed, the base URL must use `https`, and error messages and audit records are redacted and size-capped.
+- **The API key stays on the API origin.** Redirects are never followed, the base URL must use `https`, and error messages and audit records are redacted (by each instance, with that instance's key) and size-capped.
 - **The HTTP transport fails closed.** It refuses to start on a non-loopback address or with any origin allowed unless a token is set, compares tokens in constant time, throttles failed authentication per client address, checks `Origin` and `Host` (DNS rebinding), and caps request bodies.
 
 Report vulnerabilities as described in [SECURITY.md](SECURITY.md).

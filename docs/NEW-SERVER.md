@@ -27,18 +27,27 @@ Check that `mcp-server-<name>` is free on npm (`npm view mcp-server-<name>` shou
 ## 3. Implement the upstream API
 
 - `src/<name>/client.ts`: `API_KEY_HEADER` (error text redaction follows it), `UPSTREAM_HOST_SUFFIXES` to pin the hosts the key may be sent to, and a default base URL if the vendor has one fixed host.
-- `src/errors.ts`: the vendor's error model and status or error-code hints; key names in `SECRET_PATTERNS`.
+- `src/errors.ts`: the vendor's error model and status or error-code hints; credential key names in `BASE_PATTERNS`. Secret values are never registered globally: each client owns a `SecretRedactor` holding its key and key header.
 - API calls next to `src/<name>/items.ts`; pass every caller-supplied path segment through `encodePathParam`.
-- Tools in the table in `src/tools/<name>.ts`: strict zod input, correct annotations. Read-only tools receive a client that refuses non-GET requests; give POST-based searches a dedicated method instead of the full client.
+- Tools in the table in `src/tools/<name>.ts`: strict zod input, correct annotations, and `upstream`, every API request the handler may make. It is published in the gateway tool catalog; the catalog test checks it against the requests each tool makes, so add a sample input there for each new tool. Read-only tools receive a client that refuses non-GET requests; give POST-based searches a dedicated method instead of the full client.
 - Audit fields in `src/<name>/audit.ts`: ids in clear text, free text hashed, payloads by field name only.
 - Policy in `src/<name>/policy.ts`: instance allowlists, if any.
 - Tests, README tool and configuration tables, `.env.example` and `server.json` `environmentVariables` alongside.
 
-## 4. Container image
+## 4. Multi-tenant embedding
+
+The `./gateway` export is built for hosts that run several tenants in one process. Keep these properties when adapting it:
+
+- `create<Name>Gateway` requires every tenant-specific credential (the API key, and the base URL when it differs per tenant) as an option and throws when one is missing. The client reads omitted credentials from `credentialEnv`; the gateway passes `{}`, so it never falls back to the environment. A value with a fixed vendor default (for example a single API host) can keep the default.
+- Redaction is per instance: pass the client's `redactor` to everything that formats errors or writes audit records for that instance, and do not add module-level secret registries.
+- New tools appear in `<name>ToolCatalog` automatically; declare their `upstream` requests.
+- Instance policy (writes, disabled tools, audit log) and limits stay process-wide and environment-based.
+
+## 5. Container image
 
 The first push to `main` after the rename publishes `ghcr.io/<owner>/<repo>`. A new GHCR package is private: make it public in the package settings if users should pull it, and link it to the repository if GitHub did not.
 
-## 5. First npm release (bootstrap)
+## 6. First npm release (bootstrap)
 
 npm cannot configure a trusted publisher for a package that does not exist yet.
 
@@ -53,10 +62,10 @@ npm cannot configure a trusted publisher for a package that does not exist yet.
 
    A new configuration expires unless it completes a publish within two days.
 
-## 6. Later releases
+## 7. Later releases
 
 See "Releasing" in the README: bump the version, update the changelog, merge, push a `vX.Y.Z` tag.
 
-## 7. Listings
+## 8. Listings
 
 Once the repository is public, claim the server on glama.ai (`glama.json` lists the maintainers). The MCP Registry entry is created by the first tagged release.

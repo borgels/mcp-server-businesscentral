@@ -8,7 +8,7 @@ import {
 } from '../example/annotations.js';
 import { assertAuditLogWritable, auditTarget, newRequestId, writeAuditEvent } from '../example/audit.js';
 import { readOnlyClient, type UpstreamClient } from '../example/client.js';
-import { formatUnknownError } from '../errors.js';
+import { formatUnknownError, type SecretRedactor } from '../errors.js';
 import { createItem, getItem } from '../example/items.js';
 import { checkInputPolicy, checkToolPolicy, isToolDisabled, validatePolicyConfig } from '../example/policy.js';
 
@@ -16,6 +16,23 @@ const MAX_ID_LENGTH = 200;
 const idSchema = z.string().trim().min(1).max(MAX_ID_LENGTH);
 
 type ToolAnnotations = typeof READ_TOOL_ANNOTATIONS | typeof WRITE_TOOL_ANNOTATIONS;
+
+/**
+ * One upstream request a tool may make: `read` or `write`, the HTTP method
+ * and the path template relative to the base URL (`{name}` marks a
+ * caller-supplied segment). Published in the gateway tool catalog so a host
+ * can see what each tool touches; keep it in step with the handler.
+ */
+export interface UpstreamOperation {
+  access: 'read' | 'write';
+  method: 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE';
+  path: string;
+}
+
+/** A client that carries the redactor of its instance (ExampleClient does). */
+export interface RedactingClient extends UpstreamClient {
+  readonly redactor: SecretRedactor;
+}
 
 /**
  * One definition per tool, shared by the MCP server and the gateway entry
@@ -34,6 +51,8 @@ export interface ToolDefinition<S extends z.ZodRawShape = z.ZodRawShape> {
   returnsUpstreamContent: boolean;
   /** Short human-readable summary used by the gateway result text. */
   summary: string;
+  /** Every upstream request the handler may make. */
+  upstream: readonly UpstreamOperation[];
   /**
    * Read-only tools (readOnlyHint) receive a client view that refuses
    * non-GET requests, so a mis-annotated tool cannot write.
@@ -63,6 +82,7 @@ export const EXAMPLE_TOOLS: ToolDefinition[] = [
     annotations: READ_TOOL_ANNOTATIONS,
     returnsUpstreamContent: true,
     summary: 'Fetched item.',
+    upstream: [{ access: 'read', method: 'GET', path: '/items/{itemId}' }],
     handler: async (client, input) => getItem(client, input),
   }),
   defineTool({
@@ -77,6 +97,7 @@ export const EXAMPLE_TOOLS: ToolDefinition[] = [
     annotations: WRITE_TOOL_ANNOTATIONS,
     returnsUpstreamContent: true,
     summary: 'Created item.',
+    upstream: [{ access: 'write', method: 'POST', path: '/items' }],
     handler: async (client, input) => createItem(client, input),
   }),
 ];
@@ -106,7 +127,7 @@ export function enabledTools(): ToolDefinition[] {
   return EXAMPLE_TOOLS.filter(tool => !isToolDisabled(tool.name));
 }
 
-export function registerTools(server: McpServer, client: UpstreamClient): void {
+export function registerTools(server: McpServer, client: RedactingClient): void {
   validateToolConfig();
   for (const tool of enabledTools()) {
     server.registerTool(
@@ -121,8 +142,11 @@ export function registerTools(server: McpServer, client: UpstreamClient): void {
         try {
           return mcpToolResult(tool, await executeTool(tool, client, input));
         } catch (error) {
-          // Central redaction: no error text reaches the client unredacted.
-          return { isError: true, content: [{ type: 'text' as const, text: formatUnknownError(error) }] };
+          // Central redaction with this instance's secrets: no error text reaches the client unredacted.
+          return {
+            isError: true,
+            content: [{ type: 'text' as const, text: formatUnknownError(error, client.redactor) }],
+          };
         }
       },
     );
@@ -160,12 +184,13 @@ export function normaliseCallContext(context: unknown): { requestId: string; cal
  */
 export async function executeTool(
   tool: ToolDefinition,
-  client: UpstreamClient,
+  client: RedactingClient,
   input: Record<string, unknown>,
   context?: CallContext,
 ): Promise<unknown> {
   const { requestId, caller } = normaliseCallContext(context);
   const target = auditTarget(input);
+  const { redactor } = client;
 
   const policy = checkToolPolicy(tool.name, tool.annotations.readOnlyHint);
   const inputPolicy = policy.allowed ? checkInputPolicy(tool.name, input) : policy;
@@ -177,7 +202,7 @@ export async function executeTool(
   // Write tools fail closed: no write runs without its start record.
   await writeAuditEvent(
     { requestId, tool: tool.name, caller, action: 'start', target, reason: policy.reason },
-    { required: !tool.annotations.readOnlyHint },
+    { required: !tool.annotations.readOnlyHint, redactor },
   );
   const startedAt = performance.now();
 
@@ -204,7 +229,7 @@ export async function executeTool(
       status: 'error',
       durationMs: Math.round(performance.now() - startedAt),
       error,
-    });
+    }, { redactor });
     throw error;
   }
 }

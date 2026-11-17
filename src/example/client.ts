@@ -1,18 +1,25 @@
-import { ConfigError, readEnvBoolean, readEnvInteger, readEnvString } from '../config-env.js';
+import { ConfigError, readEnvBoolean, readEnvInteger, readEnvString, type Env } from '../config-env.js';
 import {
   ExampleHttpError,
   describeUrl,
   formatUnknownError,
   parseRetryAfterMs,
   redactSecrets,
-  registerSecret,
-  registerSecretHeader,
+  SecretRedactor,
 } from '../errors.js';
 import { USER_AGENT } from '../version.js';
 
 export interface ExampleClientOptions {
+  /** API key. When omitted, read from EXAMPLE_API_KEY in `credentialEnv`. */
   apiKey?: string;
+  /** API base URL. When omitted, read from EXAMPLE_BASE_URL in `credentialEnv`. */
   baseUrl?: string;
+  /**
+   * Where omitted credentials (apiKey, baseUrl) are read from. Defaults to
+   * process.env for the standalone server. The gateway passes `{}`, so an
+   * embedded instance only ever uses the credentials it was given.
+   */
+  credentialEnv?: Env;
   fetchImpl?: typeof fetch;
   /** Per-attempt timeout covering headers and body (default 30 s, env EXAMPLE_TIMEOUT_MS). */
   timeoutMs?: number;
@@ -42,7 +49,6 @@ type HttpMethod = 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE';
 
 /** Header that carries the API key. Change it to match the upstream API; error text redaction follows it. */
 export const API_KEY_HEADER = 'X-API-Key';
-registerSecretHeader(API_KEY_HEADER);
 
 /**
  * Hosts the API key may be sent to (exact host or any subdomain), e.g.
@@ -111,8 +117,13 @@ export function readOnlyClient(client: UpstreamClient, toolName: string): Upstre
  * errors and transient network failures; other methods are never retried.
  * A missing API key or base URL only fails when a request is made, so the
  * tool list can be read without credentials.
+ *
+ * Each client owns a SecretRedactor holding its own key and key header;
+ * errors raised by the client, and the audit and tool results of calls
+ * made through it, are redacted with it.
  */
 export class ExampleClient implements UpstreamClient {
+  readonly redactor: SecretRedactor;
   private readonly apiKey?: string;
   readonly baseUrl?: string;
   private readonly fetchImpl: typeof fetch;
@@ -125,9 +136,10 @@ export class ExampleClient implements UpstreamClient {
   private readonly sleep: (ms: number) => Promise<void>;
 
   constructor(options: ExampleClientOptions = {}) {
-    this.apiKey = options.apiKey ?? readEnvString('EXAMPLE_API_KEY');
-    registerSecret(this.apiKey);
-    const baseUrl = options.baseUrl ?? readEnvString('EXAMPLE_BASE_URL');
+    const credentialEnv = options.credentialEnv ?? process.env;
+    this.apiKey = options.apiKey ?? readEnvString('EXAMPLE_API_KEY', credentialEnv);
+    this.redactor = new SecretRedactor().addHeader(API_KEY_HEADER).addSecret(this.apiKey);
+    const baseUrl = options.baseUrl ?? readEnvString('EXAMPLE_BASE_URL', credentialEnv);
     if (baseUrl !== undefined) {
       this.baseUrl = trimTrailingSlash(baseUrl);
       assertSafeBaseUrl(
@@ -205,7 +217,7 @@ export class ExampleClient implements UpstreamClient {
     return this.execute(method, url, init, async response => {
       if (isRedirect(response.status)) {
         await discardBody(response);
-        throw new Error(redirectRefusedMessage(response, method, url));
+        throw new Error(this.redactor.redact(redirectRefusedMessage(response, method, url)));
       }
 
       if (!response.ok) {
@@ -215,6 +227,7 @@ export class ExampleClient implements UpstreamClient {
           url: describeUrl(url),
           payload,
           retryAfter: response.headers.get('retry-after') ?? undefined,
+          redactor: this.redactor,
         });
       }
 
@@ -300,11 +313,11 @@ export class ExampleClient implements UpstreamClient {
   private transportError(method: HttpMethod, url: string, error: unknown): Error {
     const target = describeUrl(url);
     if (isTimeoutError(error)) {
-      return new Error(redactSecrets(`Example API request timed out after ${this.timeoutMs} ms (${method} ${target}).`));
+      return new Error(this.redactor.redact(`Example API request timed out after ${this.timeoutMs} ms (${method} ${target}).`));
     }
-    const cause = error instanceof Error && error.cause !== undefined ? formatUnknownError(error.cause) : undefined;
-    const message = `Network error calling the Example API (${method} ${target}): ${formatUnknownError(error)}${cause ? ` (cause: ${cause})` : ''}`;
-    return new Error(redactSecrets(message), { cause: error });
+    const cause = error instanceof Error && error.cause !== undefined ? formatUnknownError(error.cause, this.redactor) : undefined;
+    const message = `Network error calling the Example API (${method} ${target}): ${formatUnknownError(error, this.redactor)}${cause ? ` (cause: ${cause})` : ''}`;
+    return new Error(this.redactor.redact(message), { cause: error });
   }
 }
 

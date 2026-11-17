@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { accessSync, constants, statSync } from 'node:fs';
 import { appendFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
-import { ExampleHttpError, formatUnknownError, redactSecrets } from '../errors.js';
+import { ExampleHttpError, formatUnknownError, type SecretRedactor } from '../errors.js';
 import { ConfigError, readEnvString } from '../config-env.js';
 
 export interface AuditEvent {
@@ -26,7 +26,10 @@ const MAX_AUDIT_MESSAGE_LENGTH = 200;
  * redacted message. Response bodies are never logged in full, since APIs
  * often echo input (names, e-mail addresses) in error text.
  */
-export function auditErrorSummary(error: unknown): { httpStatus?: number; errorCode?: string; message: string } {
+export function auditErrorSummary(
+  error: unknown,
+  redactor?: SecretRedactor,
+): { httpStatus?: number; errorCode?: string; message: string } {
   if (error instanceof ExampleHttpError) {
     return {
       httpStatus: error.status,
@@ -34,7 +37,7 @@ export function auditErrorSummary(error: unknown): { httpStatus?: number; errorC
       message: `Example API request failed with HTTP ${error.status}`,
     };
   }
-  const message = redactSecrets(formatUnknownError(error));
+  const message = formatUnknownError(error, redactor);
   return {
     message: message.length > MAX_AUDIT_MESSAGE_LENGTH ? `${message.slice(0, MAX_AUDIT_MESSAGE_LENGTH)}…` : message,
   };
@@ -69,9 +72,13 @@ export function assertAuditLogWritable(): void {
  * the tool result: after a call has run, surfacing an error would invite a
  * retry and a duplicate write. With `required: true` (used for the event
  * written before a write tool runs) the failure is thrown instead, so no
- * write happens without an audit record.
+ * write happens without an audit record. `redactor` is the redactor of the
+ * instance that ran the call.
  */
-export async function writeAuditEvent(event: AuditEvent, options: { required?: boolean } = {}): Promise<void> {
+export async function writeAuditEvent(
+  event: AuditEvent,
+  options: { required?: boolean; redactor?: SecretRedactor } = {},
+): Promise<void> {
   const auditPath = readEnvString('EXAMPLE_AUDIT_LOG');
   if (!auditPath) {
     return;
@@ -88,17 +95,17 @@ export async function writeAuditEvent(event: AuditEvent, options: { required?: b
       status: event.status,
       durationMs: event.durationMs,
       reason: event.reason,
-      ...(event.error === undefined ? {} : errorFields(auditErrorSummary(event.error))),
+      ...(event.error === undefined ? {} : errorFields(auditErrorSummary(event.error, options.redactor))),
     };
 
     await appendFile(auditPath, `${JSON.stringify(record)}\n`, 'utf8');
   } catch (error) {
     if (options.required) {
       // Details (path, OS error) go to stderr only, not to the caller.
-      process.stderr.write(`[example-mcp] audit log write failed, refusing ${event.tool}: ${formatUnknownError(error)}\n`);
+      process.stderr.write(`[example-mcp] audit log write failed, refusing ${event.tool}: ${formatUnknownError(error, options.redactor)}\n`);
       throw new Error(`Audit log is not writable on this instance; ${event.tool} was not run.`);
     }
-    process.stderr.write(`[example-mcp] audit log write failed: ${formatUnknownError(error)}\n`);
+    process.stderr.write(`[example-mcp] audit log write failed: ${formatUnknownError(error, options.redactor)}\n`);
   }
 }
 

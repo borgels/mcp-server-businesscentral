@@ -14,34 +14,77 @@ export const MAX_ERROR_TEXT = 500;
 /** Configured secrets shorter than this are not redacted by value (too likely to hit normal text). */
 const MIN_SECRET_LENGTH = 8;
 
-const SECRET_PATTERNS: RegExp[] = [
-  /["']?x-api-key["']?\s*[:=]\s*["']?[^"',\s}]+/gi,
+/** Matches `<name>: <value>`, `<name>=<value>` and `"<name>": "<value>"` for one header (case-insensitive). */
+function headerPattern(name: string): RegExp {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(String.raw`["']?${escaped}["']?\s*[:=]\s*["']?[^"',\s}]+`, 'gi');
+}
+
+/** Patterns that are always applied: credential-shaped key/value pairs. They hold no secret values. */
+const BASE_PATTERNS: readonly RegExp[] = [
+  headerPattern('x-api-key'),
   // Any scheme word (Bearer, Basic, Token, ...) followed by the credentials.
   /["']?authorization["']?\s*[:=]\s*["']?(?:[a-z][\w-]*\s+)?[^"',\s}]+/gi,
   /(apiKey|EXAMPLE_API_KEY|api_key|access_token)["']?\s*[:=]\s*["']?[^"',\s}]+/gi,
 ];
 
-/** Redact `<name>: <value>`, `<name>=<value>` and `"<name>": "<value>"` for this header (case-insensitive). */
-export function registerSecretHeader(name: string): void {
-  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const pattern = new RegExp(String.raw`["']?${escaped}["']?\s*[:=]\s*["']?[^"',\s}]+`, 'gi');
-  if (!SECRET_PATTERNS.some(existing => existing.source === pattern.source)) {
-    SECRET_PATTERNS.push(pattern);
+/**
+ * Redacts the secrets of one client, and so of one gateway or server
+ * instance: exact secret values, and the values of named credential headers.
+ * Each instance owns its redactor, so a host that runs several tenants in
+ * one process never mixes their keys, and a tenant's key is released with
+ * its instance. There is no process-wide registry.
+ */
+export class SecretRedactor {
+  private readonly secrets = new Set<string>();
+  private readonly patterns: RegExp[] = [...BASE_PATTERNS];
+
+  /** Redact this exact value (and its URL-encoded form). Values shorter than 8 characters are ignored. */
+  addSecret(value: string | undefined): this {
+    if (!value || value.length < MIN_SECRET_LENGTH) {
+      return this;
+    }
+    this.secrets.add(value);
+    const encoded = encodeURIComponent(value);
+    if (encoded !== value) {
+      this.secrets.add(encoded);
+    }
+    return this;
+  }
+
+  /** Redact the value of this header wherever it appears as `<name>: <value>` or `<name>=<value>`. */
+  addHeader(name: string): this {
+    const pattern = headerPattern(name);
+    if (!this.patterns.some(existing => existing.source === pattern.source)) {
+      this.patterns.push(pattern);
+    }
+    return this;
+  }
+
+  /** Whether this exact value is one of this instance's secrets. */
+  hasSecret(value: string): boolean {
+    return this.secrets.has(value);
+  }
+
+  redact(value: string): string {
+    let result = value;
+    for (const secret of this.secrets) {
+      result = result.split(secret).join('[REDACTED]');
+    }
+    return applyPatterns(result, this.patterns);
   }
 }
 
-const registeredSecrets = new Set<string>();
-
-/** Redact this exact value (and its URL-encoded form) wherever it appears in error text. */
-export function registerSecret(value: string | undefined): void {
-  if (!value || value.length < MIN_SECRET_LENGTH) {
-    return;
-  }
-  registeredSecrets.add(value);
-  const encoded = encodeURIComponent(value);
-  if (encoded !== value) {
-    registeredSecrets.add(encoded);
-  }
+function applyPatterns(value: string, patterns: readonly RegExp[]): string {
+  return patterns.reduce(
+    (current, pattern) =>
+      current.replace(pattern, match => {
+        // Split at the first separator only: the value may itself contain `:` or `=`.
+        const [, key = 'secret', separator = ':'] = /^(.*?)\s*([:=])/.exec(match) ?? [];
+        return `${key.trim()}${separator} [REDACTED]`;
+      }),
+    value,
+  );
 }
 
 /**
@@ -62,41 +105,41 @@ export class ExampleHttpError extends Error {
   readonly retryAfter?: string;
   readonly errorCode?: string;
 
-  constructor(input: { status: number; url: string; payload?: UpstreamErrorPayload | unknown; retryAfter?: string }) {
-    super(formatHttpError(input));
+  constructor(input: {
+    status: number;
+    url: string;
+    payload?: UpstreamErrorPayload | unknown;
+    retryAfter?: string;
+    /** Redactor of the client that made the request. */
+    redactor?: SecretRedactor;
+  }) {
+    const redact = (value: string) => redactSecrets(value, input.redactor);
+    super(formatHttpError(input, redact));
     this.name = 'ExampleHttpError';
     this.status = input.status;
-    this.url = redactSecrets(describeUrl(input.url));
+    this.url = redact(describeUrl(input.url));
     this.payload =
-      typeof input.payload === 'string' ? truncate(redactSecrets(input.payload)) : redactDeep(input.payload);
+      typeof input.payload === 'string' ? truncate(redact(input.payload)) : redactDeep(input.payload, input.redactor);
     this.retryAfter = input.retryAfter;
     const code = asErrorPayload(input.payload)?.code;
     this.errorCode =
-      typeof code === 'string' || typeof code === 'number' ? truncate(redactSecrets(String(code)), 64) : undefined;
+      typeof code === 'string' || typeof code === 'number' ? truncate(redact(String(code)), 64) : undefined;
   }
 }
 
-export function formatUnknownError(error: unknown): string {
+export function formatUnknownError(error: unknown, redactor?: SecretRedactor): string {
   if (error instanceof Error) {
-    return redactSecrets(error.message);
+    return redactSecrets(error.message, redactor);
   }
-  return redactSecrets(String(error));
+  return redactSecrets(String(error), redactor);
 }
 
-export function redactSecrets(value: string): string {
-  let result = value;
-  for (const secret of registeredSecrets) {
-    result = result.split(secret).join('[REDACTED]');
-  }
-  return SECRET_PATTERNS.reduce(
-    (current, pattern) =>
-      current.replace(pattern, match => {
-        // Split at the first separator only: the value may itself contain `:` or `=`.
-        const [, key = 'secret', separator = ':'] = /^(.*?)\s*([:=])/.exec(match) ?? [];
-        return `${key.trim()}${separator} [REDACTED]`;
-      }),
-    result,
-  );
+/**
+ * Redact with an instance's redactor. Without one, only the credential-shaped
+ * patterns are applied: no secret values are known outside an instance.
+ */
+export function redactSecrets(value: string, redactor?: SecretRedactor): string {
+  return redactor ? redactor.redact(value) : applyPatterns(value, BASE_PATTERNS);
 }
 
 /** Origin and path of a URL, without query string or fragment (which may carry signatures). */
@@ -110,18 +153,21 @@ export function describeUrl(url: string | URL): string {
 }
 
 /** Copy of a JSON-like value with every string passed through redactSecrets. */
-export function redactDeep(value: unknown, depth = 0): unknown {
+export function redactDeep(value: unknown, redactor?: SecretRedactor, depth = 0): unknown {
   if (typeof value === 'string') {
-    return redactSecrets(value);
+    return redactSecrets(value, redactor);
   }
   if (typeof value !== 'object' || value === null || depth > 20) {
     return value;
   }
   if (Array.isArray(value)) {
-    return value.map(entry => redactDeep(entry, depth + 1));
+    return value.map(entry => redactDeep(entry, redactor, depth + 1));
   }
   return Object.fromEntries(
-    Object.entries(value).map(([key, entry]) => [redactSecrets(key), redactDeep(entry, depth + 1)]),
+    Object.entries(value).map(([key, entry]) => [
+      redactSecrets(key, redactor),
+      redactDeep(entry, redactor, depth + 1),
+    ]),
   );
 }
 
@@ -156,15 +202,19 @@ export function truncate(value: string, max: number = MAX_ERROR_TEXT): string {
   return value.length > max ? `${value.slice(0, max)}… [truncated, ${value.length} chars]` : value;
 }
 
-function formatHttpError(input: { status: number; url: string; payload?: unknown; retryAfter?: string }): string {
+function formatHttpError(
+  input: { status: number; url: string; payload?: unknown; retryAfter?: string },
+  redact: (value: string) => string,
+): string {
   const payload = asErrorPayload(input.payload);
+  const text = (value: unknown) => detailText(value, redact);
   const details = [text(payload?.code), text(payload?.error), text(payload?.message)].filter(Boolean);
   if (details.length === 0) {
     // Redact before truncating so a secret cut at the boundary cannot leak a prefix.
     if (payload !== undefined) {
-      details.push(truncate(redactSecrets(JSON.stringify(payload))));
+      details.push(truncate(redact(JSON.stringify(payload))));
     } else if (typeof input.payload === 'string' && input.payload.trim()) {
-      details.push(truncate(redactSecrets(input.payload.trim())));
+      details.push(truncate(redact(input.payload.trim())));
     }
   }
 
@@ -175,7 +225,7 @@ function formatHttpError(input: { status: number; url: string; payload?: unknown
     formatRetryAfter(input.retryAfter),
   ].filter(Boolean);
 
-  return redactSecrets(parts.join(' | '));
+  return redact(parts.join(' | '));
 }
 
 function formatRetryAfter(value: string | undefined): string | undefined {
@@ -186,14 +236,14 @@ function formatRetryAfter(value: string | undefined): string | undefined {
   return ms === undefined ? undefined : `retry-after=${Math.ceil(ms / 1000)}s`;
 }
 
-function text(value: unknown): string | undefined {
+function detailText(value: unknown, redact: (value: string) => string): string | undefined {
   if (typeof value === 'number' && Number.isFinite(value)) {
     return String(value);
   }
   if (typeof value !== 'string' || !value.trim()) {
     return undefined;
   }
-  return truncate(redactSecrets(value.trim()));
+  return truncate(redact(value.trim()));
 }
 
 function asErrorPayload(value: unknown): UpstreamErrorPayload | undefined {

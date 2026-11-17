@@ -2,7 +2,7 @@ import { createServer as createHttpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { API_KEY_HEADER, ExampleClient } from '../src/example/client.js';
-import { ExampleHttpError, parseRetryAfterMs, redactSecrets, registerSecretHeader } from '../src/errors.js';
+import { ExampleHttpError, parseRetryAfterMs, redactSecrets, SecretRedactor } from '../src/errors.js';
 import { USER_AGENT } from '../src/version.js';
 
 const originalEnv = { ...process.env };
@@ -195,7 +195,8 @@ describe('error handling', () => {
   });
 
   it('redacts the configured key header by name', () => {
-    registerSecretHeader('X-Vendor-Token');
+    const redactor = new SecretRedactor().addHeader('X-Vendor-Token').addHeader(API_KEY_HEADER);
+    const redactSecrets = (text: string) => redactor.redact(text);
     expect(redactSecrets('sent x-vendor-token: abc123, ok')).toBe('sent x-vendor-token: [REDACTED], ok');
     expect(redactSecrets(`${API_KEY_HEADER}: abc123`)).not.toContain('abc123');
     for (const text of [
