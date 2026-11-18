@@ -1,6 +1,6 @@
 {
   "name": "mcp-server-example",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "mcpName": "io.github.borgels/mcp-server-example",
   "description": "Unofficial MCP server for the Example API.",
   "type": "module",

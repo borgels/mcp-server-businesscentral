@@ -6,7 +6,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { FRAGMENT_LENGTH, MAX_REDACT_DEPTH, redactDeep, SecretRedactor } from '../src/errors.js';
 import { createExampleGateway, type GatewayToolResult } from '../src/gateway.js';
-import { BASE } from './helpers.js';
+import { BASE, gateway } from './helpers.js';
 
 const KEY = `tenant"a\\kEy-${'Q7'.repeat(10)}-ZZtop-0123456789`;
 const FRAGMENT = KEY.slice(0, 12);
@@ -137,5 +137,38 @@ describe('redactDeep', () => {
     expect(JSON.stringify(redactDeep(value, redactor))).toContain('‹redacted›');
     expect(JSON.stringify(redactDeep([value], redactor))).toContain('[nested too deep]');
     expect(leaks(redactDeep([value], redactor))).toEqual([]);
+  });
+});
+
+describe('the data in the text block', () => {
+  it('carries the redacted structured content as compact JSON after the summary', async () => {
+    const gw = createExampleGateway({ apiKey: KEY, baseUrl: BASE, fetchImpl: upstream, maxAttempts: 1 });
+    const result = await gw.callTool('get_item', { itemId: 'echo' });
+    expect(result.isError).toBeUndefined();
+    expect(result.content).toHaveLength(1);
+    const [summary, data, ...rest] = result.content[0]!.text.split('\n\n');
+    expect(summary).not.toBe('');
+    expect(summary).not.toContain('{');
+    expect(rest).toEqual([]);
+    expect(data).toBe(JSON.stringify(result.structuredContent));
+    expect(data).not.toContain('\n');
+    expect(data).toContain('‹redacted›');
+    expect(leaks(result)).toEqual([]);
+  });
+
+  it('gives a client that reads only the text the data', async () => {
+    const { gw } = gateway({ [`GET ${BASE}/items/7`]: { body: { id: '7', name: 'Testvare Blå' } } });
+    const result = await gw.callTool('get_item', { itemId: '7' });
+    expect(result.isError, result.content[0]?.text).toBeUndefined();
+    expect(result.content[0]!.text).toContain('"name":"Testvare Blå"');
+    expect(result.content[0]!.text.endsWith(JSON.stringify(result.structuredContent))).toBe(true);
+  });
+
+  it('leaves error results with their text only', async () => {
+    const gw = createExampleGateway({ apiKey: KEY, baseUrl: BASE, fetchImpl: upstream, maxAttempts: 1 });
+    const result = await gw.callTool('get_item', { itemId: 'error' });
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toBeUndefined();
+    expect(result.content[0]!.text).not.toContain('\n\n{');
   });
 });

@@ -1,7 +1,15 @@
 # Changelog
 
-## Unreleased
+## 0.1.1
 
+- Gateway results: the data is now in the text block too. A successful
+  `callTool` result has one text block with the summary, a blank line and
+  then `structuredContent` as compact JSON (`summary\n\n{...}`), as the MCP
+  specification recommends for tools that return structured content. Before,
+  the text held only the summary, so a client that reads only the text (as
+  Claude does) got no data. The JSON is built from the final, redacted copy,
+  so it is exactly `structuredContent`, and the sink check covers it. Error
+  results and `structuredContent` are unchanged.
 - Errors leave in final form: every error a gateway throws is a fresh
   error with no `cause`, a `stack` of just `name: message` (no frames,
   paths or function names), and name, message and stack masked against the
