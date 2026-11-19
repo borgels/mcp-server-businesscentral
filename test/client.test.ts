@@ -76,9 +76,24 @@ describe('BusinesscentralClient', () => {
   it('refuses unsafe base URLs without echoing credentials', () => {
     expect(() => new BusinesscentralClient({ apiKey: 'k', baseUrl: 'http://api.businesscentral.dynamics.com' })).toThrow('https://');
     expect(() => new BusinesscentralClient({ apiKey: 'k', baseUrl: 'not a url' })).toThrow('not a valid URL');
-    expect(() => new BusinesscentralClient({ apiKey: 'k', baseUrl: 'http://127.0.0.1:8080/api' })).not.toThrow();
-    expect(() => new BusinesscentralClient({ apiKey: 'k', baseUrl: 'http://localhost:8080/api' })).not.toThrow();
-    expect(() => new BusinesscentralClient({ apiKey: 'k', baseUrl: 'http://[::1]:8080/api' })).not.toThrow();
+    // Exact host only by default: no loopback, no subdomain, no other port, no other host.
+    for (const baseUrl of [
+      'http://127.0.0.1:8080/api',
+      'http://localhost:8080/api',
+      'http://[::1]:8080/api',
+      'https://sub.api.businesscentral.dynamics.com/api/v2.0',
+      'https://api.businesscentral.dynamics.com.evil.invalid/api/v2.0',
+      'https://api.businesscentral.dynamics.com:8443/api/v2.0',
+      'https://elsewhere.invalid/api/v2.0',
+    ]) {
+      expect(() => new BusinesscentralClient({ apiKey: 'k', baseUrl }), baseUrl).toThrow('must be https://api.businesscentral.dynamics.com');
+    }
+    expect(() => new BusinesscentralClient({ apiKey: 'k', baseUrl: 'https://api.businesscentral.dynamics.com/v2.0/t/Production/api/v2.0' })).not.toThrow();
+    // There is no override: not in the options, not in the environment.
+    process.env.BC_ALLOW_CUSTOM_BASE_URL = 'true';
+    expect(() => new BusinesscentralClient({ apiKey: 'k', baseUrl: 'http://127.0.0.1:8080/api', allowCustomBaseUrl: true } as never)).toThrow('must be https://api.businesscentral.dynamics.com');
+    expect(() => new BusinesscentralClient({ apiKey: 'k', baseUrl: 'https://sub.api.businesscentral.dynamics.com/api' })).toThrow('must be https://api.businesscentral.dynamics.com');
+    delete process.env.BC_ALLOW_CUSTOM_BASE_URL;
 
     for (const baseUrl of [
       'https://user:hunter2@api.businesscentral.dynamics.com/v1',
@@ -108,8 +123,6 @@ describe('BusinesscentralClient', () => {
     process.env.BC_MAX_RESPONSE_BYTES = '10MB';
     expect(() => new BusinesscentralClient({ apiKey: 'k' })).toThrow('BC_MAX_RESPONSE_BYTES');
     delete process.env.BC_MAX_RESPONSE_BYTES;
-    process.env.BC_ALLOW_CUSTOM_BASE_URL = 'perhaps';
-    expect(() => new BusinesscentralClient({ apiKey: 'k', baseUrl: BASE })).toThrow('BC_ALLOW_CUSTOM_BASE_URL');
 
     expect(() => new BusinesscentralClient({ apiKey: 'k', maxConcurrency: 0 })).toThrow('maxConcurrency');
     expect(() => new BusinesscentralClient({ apiKey: 'k', maxConcurrency: Number.NaN })).toThrow('maxConcurrency');
@@ -265,11 +278,27 @@ describe('error handling', () => {
   });
 
   it('caps successful response bodies', async () => {
-    const big = makeFetch(
-      () => new Response('x'.repeat(100), { status: 200, headers: { 'content-type': 'text/plain' } }),
-    );
+    const body = JSON.stringify({ value: 'x'.repeat(100) });
+    const big = makeFetch(() => new Response(body, { status: 200, headers: { 'content-type': 'application/json' } }));
     await expect(makeClient(big, { maxResponseBytes: 10 }).get('/x')).rejects.toThrow('exceeds the 10 byte limit');
-    await expect(makeClient(big, { maxResponseBytes: 1000 }).get('/x')).resolves.toBe('x'.repeat(100));
+    await expect(makeClient(big, { maxResponseBytes: 1000 }).get('/x')).resolves.toEqual({ value: 'x'.repeat(100) });
+  });
+
+  it('refuses a body that is not a JSON object, with fixed texts that quote nothing of it', async () => {
+    const answer = (body: string, type: string) => makeFetch(() => new Response(body, { status: 200, headers: { 'content-type': type } }));
+    const cases: Array<[string, string, string]> = [
+      ['<html>secret-ish page</html>', 'text/html', 'something other than JSON'],
+      ['{"value": [', 'application/json', 'could not be read'],
+      ['[1,2]', 'application/json', 'unexpected form'],
+      ['"secret-ish"', 'application/json; odata.metadata=minimal', 'unexpected form'],
+    ];
+    for (const [body, type, text] of cases) {
+      const error = await makeClient(answer(body, type)).get('/x').catch((e: unknown) => e as Error);
+      expect(error, body).toBeInstanceOf(Error);
+      expect((error as Error).message).toContain(text);
+      expect((error as Error).message).not.toContain('secret-ish');
+    }
+    await expect(makeClient(answer('{"value":[]}', 'application/json;odata.metadata=minimal')).get('/x')).resolves.toEqual({ value: [] });
   });
 });
 
@@ -419,7 +448,8 @@ describe('against a local upstream (real sockets)', () => {
       }
       res.writeHead(302, { location: `${base}/items/1` }).end();
     });
-    const client = new BusinesscentralClient({ apiKey: 'local-key-123456', baseUrl: base });
+    // The client only talks to the API host; the test's fetch carries the request to the local socket instead.
+    const client = new BusinesscentralClient({ apiKey: 'local-key-123456', baseUrl: BASE, fetchImpl: toLocal(base) });
 
     await expect(client.get('/items/1')).resolves.toEqual({ id: '1' });
     await expect(client.get('/moved')).rejects.toThrow('redirects are not followed');
@@ -433,8 +463,14 @@ describe('against a local upstream (real sockets)', () => {
     const base = await startUpstream(() => {
       // never answers
     });
-    const client = new BusinesscentralClient({ apiKey: 'k', baseUrl: base, timeoutMs: 100, maxAttempts: 1 });
+    const client = new BusinesscentralClient({ apiKey: 'k', baseUrl: BASE, timeoutMs: 100, maxAttempts: 1, fetchImpl: toLocal(base) });
     await expect(client.get('/slow')).rejects.toThrow(/timed out after 100 ms/);
     upstream?.closeAllConnections();
   });
 });
+
+/** A fetch that sends a request for the API host to a local socket instead (real sockets, the host check intact). */
+function toLocal(base: string): typeof fetch {
+  return ((input: string | URL | Request, init?: RequestInit) =>
+    fetch(String(input).replace(BASE, base), init)) as typeof fetch;
+}

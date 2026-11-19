@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.1.1 (Business Central)
+
+- The token is sent to `https://api.businesscentral.dynamics.com` exactly,
+  on every surface. No loopback, subdomain, other port or other host, and no
+  override: `BC_ALLOW_CUSTOM_BASE_URL` and the `allowCustomBaseUrl` option are
+  gone.
+- The stdio and HTTP surfaces redact results like the gateway: the data is
+  redacted before it is serialised, and a result or error that still holds a
+  piece of the token is withheld.
+- Answers must be non-empty JSON objects. An empty body, another content
+  type, unreadable JSON and a root that is not an object are refused with
+  fixed texts.
+- Server-driven paging, `list_companies` included: a list's
+  `@odata.nextLink` becomes `nextSkipToken`, and `skipToken` fetches the next
+  page. The link itself is not passed on, and a next page that cannot be
+  given as a skip token is an error, never a silently shorter list.
+- The HTTP transport logs only its own paths and an error's name, never a
+  stack.
+- Audit fields: `companyId`, `customerId` and `invoiceId` in clear text;
+  `filter` and `skipToken` hashed.
+- README: authentication through Microsoft Entra (permission, admin consent,
+  Business Central's permission set) and the token provider hook; the
+  gateway example uses real tools.
+
+## 0.1.0 (Business Central)
+
+- First version from the template: ten read tools for the Business Central
+  API v2.0 (companies, customers, vendors, items, sales and purchase
+  invoices, accounts, general ledger entries).
+
+The entries below are the template's history (borgels/mcp-server-template),
+from before this server was made from it.
+
+
 ## 0.1.1
 
 - Gateway results: the data is now in the text block too. A successful

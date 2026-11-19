@@ -51,9 +51,13 @@ export function createHttpRequestHandler(config: HttpConfig, options: HttpServer
 
   return async (req: IncomingMessage, res: ServerResponse) => {
     const remote = req.socket.remoteAddress ?? 'unknown';
-    // Path only: a query string may carry credentials.
-    const describeRequest = () =>
-      `${req.method ?? '-'} ${(req.url ?? '').split('?')[0]?.slice(0, 200) ?? ''} from ${remote}`;
+    // Only our own paths are named: any other path (or a query string) may carry a credential.
+    const describeRequest = () => {
+      const path = (req.url ?? '').split('?')[0] ?? '';
+      const shown = path === '/mcp' || path === '/healthz' ? path : '(other path)';
+      const method = /^[A-Z]{1,10}$/.test(req.method ?? '') ? req.method : '-';
+      return `${method} ${shown} from ${remote}`;
+    };
     try {
       const path = (req.url ?? '/').split('?')[0];
 
@@ -127,7 +131,8 @@ export function createHttpRequestHandler(config: HttpConfig, options: HttpServer
         return;
       }
 
-      log(`[http] 500 ${describeRequest()}: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`);
+      // The error's name only: its message and stack may quote a request or a credential.
+      log(`[http] 500 ${describeRequest()}: ${error instanceof Error ? error.name : 'unexpected error'}`);
       if (!res.headersSent && !res.destroyed) {
         sendJson(res, 500, {
           jsonrpc: '2.0',

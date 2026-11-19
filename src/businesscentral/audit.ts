@@ -137,10 +137,10 @@ function errorFields(summary: ReturnType<typeof auditErrorSummary>) {
 }
 
 /** Identifier fields logged in clear text: they are opaque ids, not secrets. Extend per tool. */
-const ID_FIELDS = ['itemId'] as const;
+const ID_FIELDS = ['companyId', 'customerId', 'invoiceId'] as const;
 
 /** Free-text fields are hashed so user-written text does not land in the log. */
-const FREE_TEXT_FIELDS = ['name', 'query'] as const;
+const FREE_TEXT_FIELDS = ['filter', 'skipToken'] as const;
 
 /** Write payload objects: only their field names are logged. */
 const PAYLOAD_FIELDS = ['body', 'patch'] as const;

@@ -8,7 +8,9 @@ import {
 } from '../businesscentral/annotations.js';
 import { assertAuditLogWritable, auditTarget, newRequestId, writeAuditEvent } from '../businesscentral/audit.js';
 import { readOnlyClient, type UpstreamClient } from '../businesscentral/client.js';
-import { formatUnknownError, type SecretRedactor } from '../errors.js';
+import { formatUnknownError, redactDeep, type SecretRedactor } from '../errors.js';
+import { withheldResult } from '../fallbacks.js';
+import { leaksSecret } from '../key-admission.js';
 import { getEntity, listCompanies, listEntity, type Entity } from '../businesscentral/items.js';
 import { checkInputPolicy, checkToolPolicy, isToolDisabled, redactInScope, runInCallScope, validatePolicyConfig } from '../businesscentral/policy.js';
 
@@ -28,6 +30,14 @@ const listShape = {
     .max(500)
     .optional()
     .describe("OData $filter on this entity's fields, e.g. \"number eq '10000'\" or \"postingDate ge 2026-01-01\"."),
+  skipToken: z
+    .string()
+    .trim()
+    .min(1)
+    .max(2000)
+    .regex(/^[\x21-\x7e]+$/, 'Expected the nextSkipToken of the previous answer.')
+    .optional()
+    .describe('The nextSkipToken of the previous answer, for the next page when Business Central pages the list itself.'),
 };
 
 type ToolAnnotations = typeof READ_TOOL_ANNOTATIONS | typeof WRITE_TOOL_ANNOTATIONS;
@@ -98,7 +108,7 @@ function listTool(entity: Entity, name: string, title: string, description: stri
   return defineTool({
     name: `businesscentral_${name}`,
     title,
-    description: `${description} Paged with top and skip; filter is an OData $filter on this entity only.`,
+    description: `${description} Paged with top and skip, or with skipToken when an answer has nextSkipToken; filter is an OData $filter on this entity only.`,
     inputShape: listShape,
     annotations: READ_TOOL_ANNOTATIONS,
     returnsUpstreamContent: true,
@@ -118,13 +128,13 @@ export const BC_TOOLS: ToolDefinition[] = [
   defineTool({
     name: 'businesscentral_list_companies',
     title: 'List companies (Business Central)',
-    description: 'The companies in this Business Central environment, with id, name and display name.',
-    inputShape: {},
+    description: 'The companies in this Business Central environment, with id, name and display name. skipToken fetches the next page when an answer has nextSkipToken.',
+    inputShape: { skipToken: listShape.skipToken },
     annotations: READ_TOOL_ANNOTATIONS,
     returnsUpstreamContent: true,
     summary: 'Fetched companies.',
     upstream: [{ access: 'read', method: 'GET', path: '/companies' }],
-    handler: async client => listCompanies(client),
+    handler: async (client, input) => listCompanies(client, input as { skipToken?: string }),
   }),
   listTool('customers', 'list_customers', 'List customers (Business Central)', 'Customers with number, name, contact details, balance and blocked status.'),
   defineTool({
@@ -201,13 +211,18 @@ export function registerTools(server: McpServer, client: RedactingClient): void 
       async (input: Record<string, unknown>) => {
         try {
           // In a scope with this server's redactor, like a gateway call: audit records and context are redacted.
-          return mcpToolResult(tool, await runInCallScope({ redactor: client.redactor }, () => executeTool(tool, client, input)));
+          const data = await runInCallScope({ redactor: client.redactor }, () => executeTool(tool, client, input));
+          // As in the gateway: the data redacted (values and keys) before it is serialised, then the result checked
+          // whole as the last step, and withheld when it still holds a piece of the key.
+          const result = mcpToolResult(tool, redactDeep(redactDeep(data, client.redactor), client.redactor));
+          return leaksSecret(result, client.redactor) ? withheldResult() : result;
         } catch (error) {
           // Central redaction with this instance's secrets: no error text reaches the client unredacted.
-          return {
+          const result = {
             isError: true,
             content: [{ type: 'text' as const, text: formatUnknownError(error, client.redactor) }],
           };
+          return leaksSecret(result, client.redactor) ? withheldResult() : result;
         }
       },
     );

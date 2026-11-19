@@ -37,7 +37,7 @@ import {
  *
  * Instance policy (writes, disabled tools, audit) comes from the host when it
  * passes `policy`: that instance then reads none of BC_ENABLE_WRITES,
- * BC_DISABLED_TOOLS, BC_AUDIT_LOG or BC_ALLOW_CUSTOM_BASE_URL,
+ * BC_DISABLED_TOOLS or BC_AUDIT_LOG,
  * so two tenants in one process can have different settings. Without
  * `policy` the instance uses the environment, as the MCP server does. Limits
  * (timeouts, retries) are still read from the environment and apply to every
@@ -241,8 +241,6 @@ function buildGateway(options: BusinesscentralGatewayOptions, apiKey: string) {
     apiKey,
     baseUrl,
     credentialEnv: {},
-    // Under a host's policy nothing is read from the environment, this switch included.
-    ...(policy ? { allowCustomBaseUrl: clientOptions.allowCustomBaseUrl ?? false } : {}),
   });
   const redactor: SecretRedactor = client.redactor;
   // Every call in a scope of its own, with or without a host policy: a call made from inside another
