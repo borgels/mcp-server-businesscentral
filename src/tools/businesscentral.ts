@@ -5,15 +5,30 @@ import {
   UNTRUSTED_CONTENT_NOTE,
   UNTRUSTED_RESULT_NOTE,
   WRITE_TOOL_ANNOTATIONS,
-} from '../example/annotations.js';
-import { assertAuditLogWritable, auditTarget, newRequestId, writeAuditEvent } from '../example/audit.js';
-import { readOnlyClient, type UpstreamClient } from '../example/client.js';
+} from '../businesscentral/annotations.js';
+import { assertAuditLogWritable, auditTarget, newRequestId, writeAuditEvent } from '../businesscentral/audit.js';
+import { readOnlyClient, type UpstreamClient } from '../businesscentral/client.js';
 import { formatUnknownError, type SecretRedactor } from '../errors.js';
-import { createItem, getItem } from '../example/items.js';
-import { checkInputPolicy, checkToolPolicy, isToolDisabled, redactInScope, runInCallScope, validatePolicyConfig } from '../example/policy.js';
+import { getEntity, listCompanies, listEntity, type Entity } from '../businesscentral/items.js';
+import { checkInputPolicy, checkToolPolicy, isToolDisabled, redactInScope, runInCallScope, validatePolicyConfig } from '../businesscentral/policy.js';
 
-const MAX_ID_LENGTH = 200;
-const idSchema = z.string().trim().min(1).max(MAX_ID_LENGTH);
+const guidSchema = z
+  .string()
+  .trim()
+  .regex(/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/, 'Expected a GUID.');
+const companyIdSchema = guidSchema.describe('Company id (GUID), as list_companies returns it.');
+const listShape = {
+  companyId: companyIdSchema,
+  top: z.number().int().min(1).max(200).optional().describe('Page size, 1 to 200. Default 50.'),
+  skip: z.number().int().min(0).max(100_000).optional().describe('Records to skip, for the next page.'),
+  filter: z
+    .string()
+    .trim()
+    .min(1)
+    .max(500)
+    .optional()
+    .describe("OData $filter on this entity's fields, e.g. \"number eq '10000'\" or \"postingDate ge 2026-01-01\"."),
+};
 
 type ToolAnnotations = typeof READ_TOOL_ANNOTATIONS | typeof WRITE_TOOL_ANNOTATIONS;
 
@@ -29,7 +44,7 @@ export interface UpstreamOperation {
   path: string;
 }
 
-/** A client that carries the redactor of its instance (ExampleClient does). */
+/** A client that carries the redactor of its instance (BusinesscentralClient does). */
 export interface RedactingClient extends UpstreamClient {
   readonly redactor: SecretRedactor;
 }
@@ -39,7 +54,7 @@ export interface RedactingClient extends UpstreamClient {
  * point: same input schema, same handler, same policy and audit path.
  */
 export interface ToolDefinition<S extends z.ZodRawShape = z.ZodRawShape> {
-  /** MCP tool name (`example_*`). The gateway exposes it without the prefix. */
+  /** MCP tool name (`businesscentral_*`). The gateway exposes it without the prefix. */
   name: string;
   title: string;
   description: string;
@@ -78,48 +93,82 @@ function defineTool<S extends z.ZodRawShape>(definition: Omit<ToolDefinition<S>,
   } as unknown as ToolDefinition;
 }
 
-export const EXAMPLE_TOOLS: ToolDefinition[] = [
-  defineTool({
-    name: 'example_get_item',
-    title: 'Get Item (Example)',
-    description: 'Fetch one item by id, optionally with its history.',
-    inputShape: {
-      itemId: idSchema.describe('Item id.'),
-      includeHistory: z.boolean().optional().describe('Also read the item history. A failed history read is reported in the result.'),
-    },
+/** A read of one fixed, company-scoped entity, with paging and an OData filter on its own fields. */
+function listTool(entity: Entity, name: string, title: string, description: string): ToolDefinition {
+  return defineTool({
+    name: `businesscentral_${name}`,
+    title,
+    description: `${description} Paged with top and skip; filter is an OData $filter on this entity only.`,
+    inputShape: listShape,
     annotations: READ_TOOL_ANNOTATIONS,
     returnsUpstreamContent: true,
-    summary: 'Fetched item.',
-    upstream: [
-      { access: 'read', method: 'GET', path: '/items/{itemId}' },
-      { access: 'read', method: 'GET', path: '/items/{itemId}/history' },
-    ],
-    handler: async (client, input) => getItem(client, input),
-  }),
+    summary: `Fetched ${entity}.`,
+    upstream: [{ access: 'read', method: 'GET', path: `/companies({companyId})/${entity}` }],
+    handler: async (client, input) => listEntity(client, entity, input as never),
+  });
+}
+
+/**
+ * The tool table. Every tool reads; Business Central's permission sets on the
+ * app in Business Central (D365 READ) are the second fence. No tool reads an
+ * entity chosen by its input, so none is broad. Vendor bank accounts, employees
+ * and payroll are not read.
+ */
+export const BC_TOOLS: ToolDefinition[] = [
   defineTool({
-    name: 'example_create_item',
-    title: 'Create Item (Example)',
-    description:
-      'Create a new item. Requires write access on this instance; confirm with the user before creating.',
-    inputShape: {
-      name: z.string().trim().min(1).max(200).describe('Item name.'),
-      description: z.string().trim().max(2000).optional().describe('Optional description.'),
-    },
-    annotations: WRITE_TOOL_ANNOTATIONS,
+    name: 'businesscentral_list_companies',
+    title: 'List companies (Business Central)',
+    description: 'The companies in this Business Central environment, with id, name and display name.',
+    inputShape: {},
+    annotations: READ_TOOL_ANNOTATIONS,
     returnsUpstreamContent: true,
-    summary: 'Created item.',
-    upstream: [{ access: 'write', method: 'POST', path: '/items' }],
-    handler: async (client, input) => createItem(client, input),
+    summary: 'Fetched companies.',
+    upstream: [{ access: 'read', method: 'GET', path: '/companies' }],
+    handler: async client => listCompanies(client),
   }),
+  listTool('customers', 'list_customers', 'List customers (Business Central)', 'Customers with number, name, contact details, balance and blocked status.'),
+  defineTool({
+    name: 'businesscentral_get_customer',
+    title: 'Get customer (Business Central)',
+    description: 'One customer by id, with its financial details (balance, overdue amount, sales).',
+    inputShape: { companyId: companyIdSchema, customerId: guidSchema.describe('Customer id (GUID).') },
+    annotations: READ_TOOL_ANNOTATIONS,
+    returnsUpstreamContent: true,
+    summary: 'Fetched customer.',
+    upstream: [{ access: 'read', method: 'GET', path: '/companies({companyId})/customers({customerId})' }],
+    handler: async (client, input) => getEntity(client, 'customers', input.companyId as string, input.customerId as string, 'customerFinancialDetails'),
+  }),
+  listTool('vendors', 'list_vendors', 'List vendors (Business Central)', 'Vendors with number, name, contact details and balance. No bank accounts.'),
+  listTool('items', 'list_items', 'List items (Business Central)', 'Items with number, description, type, unit price, unit cost and inventory.'),
+  listTool('salesInvoices', 'list_sales_invoices', 'List sales invoices (Business Central)', 'Sales invoices with number, customer, dates, amounts, remaining amount and status.'),
+  defineTool({
+    name: 'businesscentral_get_sales_invoice',
+    title: 'Get sales invoice (Business Central)',
+    description: 'One sales invoice by id, with its lines.',
+    inputShape: { companyId: companyIdSchema, invoiceId: guidSchema.describe('Sales invoice id (GUID).') },
+    annotations: READ_TOOL_ANNOTATIONS,
+    returnsUpstreamContent: true,
+    summary: 'Fetched sales invoice.',
+    upstream: [{ access: 'read', method: 'GET', path: '/companies({companyId})/salesInvoices({invoiceId})' }],
+    handler: async (client, input) => getEntity(client, 'salesInvoices', input.companyId as string, input.invoiceId as string, 'salesInvoiceLines'),
+  }),
+  listTool('purchaseInvoices', 'list_purchase_invoices', 'List purchase invoices (Business Central)', 'Purchase invoices with number, vendor, dates, amounts and status.'),
+  listTool('accounts', 'list_accounts', 'List accounts (Business Central)', 'The chart of accounts: number, name, category and whether it can be posted to.'),
+  listTool(
+    'generalLedgerEntries',
+    'list_general_ledger_entries',
+    'List general ledger entries (Business Central)',
+    'Posted general ledger entries: posting date, document number, account, description, debit and credit.',
+  ),
 ];
 
 export function findTool(name: string): ToolDefinition | undefined {
-  return EXAMPLE_TOOLS.find(tool => tool.name === name);
+  return BC_TOOLS.find(tool => tool.name === name);
 }
 
 /** Validate the tool policy environment. Cheap; runs for every server instance. */
 export function validateToolConfig(): void {
-  validatePolicyConfig(EXAMPLE_TOOLS.map(tool => tool.name));
+  validatePolicyConfig(BC_TOOLS.map(tool => tool.name));
 }
 
 /**
@@ -133,9 +182,9 @@ export function validateStartupConfig(): void {
   assertAuditLogWritable();
 }
 
-/** Tools enabled on this instance (EXAMPLE_DISABLED_TOOLS removes them entirely). */
+/** Tools enabled on this instance (BC_DISABLED_TOOLS removes them entirely). */
 export function enabledTools(): ToolDefinition[] {
-  return EXAMPLE_TOOLS.filter(tool => !isToolDisabled(tool.name));
+  return BC_TOOLS.filter(tool => !isToolDisabled(tool.name));
 }
 
 export function registerTools(server: McpServer, client: RedactingClient): void {

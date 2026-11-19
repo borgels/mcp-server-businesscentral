@@ -1,8 +1,8 @@
 import { createServer as createHttpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { API_KEY_HEADER, ExampleClient } from '../src/example/client.js';
-import { ExampleHttpError, parseRetryAfterMs, redactSecrets, SecretRedactor } from '../src/errors.js';
+import { API_KEY_HEADER, BusinesscentralClient } from '../src/businesscentral/client.js';
+import { BusinesscentralHttpError, parseRetryAfterMs, redactSecrets, SecretRedactor } from '../src/errors.js';
 import { USER_AGENT } from '../src/version.js';
 
 const originalEnv = { ...process.env };
@@ -11,7 +11,7 @@ afterEach(() => {
   process.env = { ...originalEnv };
 });
 
-const BASE = 'https://api.vendor.test/v1';
+const BASE = 'https://api.businesscentral.dynamics.com/v1';
 
 type Handler = (url: string, init?: RequestInit) => Response | unknown | Promise<Response | unknown>;
 
@@ -41,11 +41,11 @@ function headersOf(init?: RequestInit): Record<string, string> {
 
 const noSleep = vi.fn(async (_ms: number) => undefined);
 
-function makeClient(fetchImpl: typeof fetch, extra: Partial<ConstructorParameters<typeof ExampleClient>[0]> = {}) {
-  return new ExampleClient({ apiKey: 'k', baseUrl: BASE, fetchImpl, sleep: noSleep, ...extra });
+function makeClient(fetchImpl: typeof fetch, extra: Partial<ConstructorParameters<typeof BusinesscentralClient>[0]> = {}) {
+  return new BusinesscentralClient({ apiKey: 'k', baseUrl: BASE, fetchImpl, sleep: noSleep, ...extra });
 }
 
-describe('ExampleClient', () => {
+describe('BusinesscentralClient', () => {
   it('sends the API key and User-Agent headers and never follows redirects', async () => {
     let seenUrl = '';
     let seenInit: RequestInit | undefined;
@@ -55,39 +55,39 @@ describe('ExampleClient', () => {
       return { id: '1' };
     });
 
-    await new ExampleClient({ apiKey: 'secret-key', baseUrl: `${BASE}/`, fetchImpl }).get('/items/1', { q: 'x' });
+    await new BusinesscentralClient({ apiKey: 'secret-key', baseUrl: `${BASE}/`, fetchImpl }).get('/items/1', { q: 'x' });
 
     expect(seenUrl).toBe(`${BASE}/items/1?q=x`);
-    expect(headersOf(seenInit)[API_KEY_HEADER]).toBe('secret-key');
+    expect(headersOf(seenInit)[API_KEY_HEADER]).toBe('Bearer secret-key');
     expect(headersOf(seenInit)['User-Agent']).toBe(USER_AGENT);
     expect(seenInit?.redirect).toBe('manual');
   });
 
   it('throws before sending anything when the API key or base URL is missing', async () => {
     const fetchImpl = makeFetch(() => ({}));
-    delete process.env.EXAMPLE_API_KEY;
-    delete process.env.EXAMPLE_BASE_URL;
+    delete process.env.BC_API_KEY;
+    delete process.env.BC_BASE_URL;
 
-    await expect(new ExampleClient({ baseUrl: BASE, fetchImpl }).get('/x')).rejects.toThrow('EXAMPLE_API_KEY');
-    await expect(new ExampleClient({ apiKey: 'k', fetchImpl }).get('/x')).rejects.toThrow('EXAMPLE_BASE_URL');
+    await expect(new BusinesscentralClient({ baseUrl: BASE, fetchImpl }).get('/x')).rejects.toThrow('BC_API_KEY');
+    await expect(new BusinesscentralClient({ apiKey: 'k', fetchImpl }).get('/x')).rejects.toThrow('BC_BASE_URL');
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
   it('refuses unsafe base URLs without echoing credentials', () => {
-    expect(() => new ExampleClient({ apiKey: 'k', baseUrl: 'http://api.vendor.test' })).toThrow('https://');
-    expect(() => new ExampleClient({ apiKey: 'k', baseUrl: 'not a url' })).toThrow('not a valid URL');
-    expect(() => new ExampleClient({ apiKey: 'k', baseUrl: 'http://127.0.0.1:8080/api' })).not.toThrow();
-    expect(() => new ExampleClient({ apiKey: 'k', baseUrl: 'http://localhost:8080/api' })).not.toThrow();
-    expect(() => new ExampleClient({ apiKey: 'k', baseUrl: 'http://[::1]:8080/api' })).not.toThrow();
+    expect(() => new BusinesscentralClient({ apiKey: 'k', baseUrl: 'http://api.businesscentral.dynamics.com' })).toThrow('https://');
+    expect(() => new BusinesscentralClient({ apiKey: 'k', baseUrl: 'not a url' })).toThrow('not a valid URL');
+    expect(() => new BusinesscentralClient({ apiKey: 'k', baseUrl: 'http://127.0.0.1:8080/api' })).not.toThrow();
+    expect(() => new BusinesscentralClient({ apiKey: 'k', baseUrl: 'http://localhost:8080/api' })).not.toThrow();
+    expect(() => new BusinesscentralClient({ apiKey: 'k', baseUrl: 'http://[::1]:8080/api' })).not.toThrow();
 
     for (const baseUrl of [
-      'https://user:hunter2@api.vendor.test/v1',
-      'https://api.vendor.test/v1?x=1',
-      'https://api.vendor.test/v1#frag',
+      'https://user:hunter2@api.businesscentral.dynamics.com/v1',
+      'https://api.businesscentral.dynamics.com/v1?x=1',
+      'https://api.businesscentral.dynamics.com/v1#frag',
     ]) {
       let message = '';
       try {
-        new ExampleClient({ apiKey: 'k', baseUrl });
+        new BusinesscentralClient({ apiKey: 'k', baseUrl });
       } catch (error) {
         message = (error as Error).message;
       }
@@ -97,24 +97,24 @@ describe('ExampleClient', () => {
   });
 
   it('validates numeric environment variables and options instead of producing NaN', () => {
-    process.env.EXAMPLE_TIMEOUT_MS = '30s';
-    expect(() => new ExampleClient({ apiKey: 'k' })).toThrow('EXAMPLE_TIMEOUT_MS');
-    process.env.EXAMPLE_TIMEOUT_MS = '3000000000';
-    expect(() => new ExampleClient({ apiKey: 'k' })).toThrow('EXAMPLE_TIMEOUT_MS');
-    delete process.env.EXAMPLE_TIMEOUT_MS;
-    process.env.EXAMPLE_MAX_CONCURRENCY = 'many';
-    expect(() => new ExampleClient({ apiKey: 'k' })).toThrow('EXAMPLE_MAX_CONCURRENCY');
-    delete process.env.EXAMPLE_MAX_CONCURRENCY;
-    process.env.EXAMPLE_MAX_RESPONSE_BYTES = '10MB';
-    expect(() => new ExampleClient({ apiKey: 'k' })).toThrow('EXAMPLE_MAX_RESPONSE_BYTES');
-    delete process.env.EXAMPLE_MAX_RESPONSE_BYTES;
-    process.env.EXAMPLE_ALLOW_CUSTOM_BASE_URL = 'perhaps';
-    expect(() => new ExampleClient({ apiKey: 'k', baseUrl: BASE })).toThrow('EXAMPLE_ALLOW_CUSTOM_BASE_URL');
+    process.env.BC_TIMEOUT_MS = '30s';
+    expect(() => new BusinesscentralClient({ apiKey: 'k' })).toThrow('BC_TIMEOUT_MS');
+    process.env.BC_TIMEOUT_MS = '3000000000';
+    expect(() => new BusinesscentralClient({ apiKey: 'k' })).toThrow('BC_TIMEOUT_MS');
+    delete process.env.BC_TIMEOUT_MS;
+    process.env.BC_MAX_CONCURRENCY = 'many';
+    expect(() => new BusinesscentralClient({ apiKey: 'k' })).toThrow('BC_MAX_CONCURRENCY');
+    delete process.env.BC_MAX_CONCURRENCY;
+    process.env.BC_MAX_RESPONSE_BYTES = '10MB';
+    expect(() => new BusinesscentralClient({ apiKey: 'k' })).toThrow('BC_MAX_RESPONSE_BYTES');
+    delete process.env.BC_MAX_RESPONSE_BYTES;
+    process.env.BC_ALLOW_CUSTOM_BASE_URL = 'perhaps';
+    expect(() => new BusinesscentralClient({ apiKey: 'k', baseUrl: BASE })).toThrow('BC_ALLOW_CUSTOM_BASE_URL');
 
-    expect(() => new ExampleClient({ apiKey: 'k', maxConcurrency: 0 })).toThrow('maxConcurrency');
-    expect(() => new ExampleClient({ apiKey: 'k', maxConcurrency: Number.NaN })).toThrow('maxConcurrency');
-    expect(() => new ExampleClient({ apiKey: 'k', timeoutMs: 2 ** 31 })).toThrow('timeoutMs');
-    expect(() => new ExampleClient({ apiKey: 'k', maxAttempts: 0 })).toThrow('maxAttempts');
+    expect(() => new BusinesscentralClient({ apiKey: 'k', maxConcurrency: 0 })).toThrow('maxConcurrency');
+    expect(() => new BusinesscentralClient({ apiKey: 'k', maxConcurrency: Number.NaN })).toThrow('maxConcurrency');
+    expect(() => new BusinesscentralClient({ apiKey: 'k', timeoutMs: 2 ** 31 })).toThrow('timeoutMs');
+    expect(() => new BusinesscentralClient({ apiKey: 'k', maxAttempts: 0 })).toThrow('maxAttempts');
   });
 });
 
@@ -123,10 +123,10 @@ describe('error handling', () => {
     const fetchImpl = makeFetch(() => jsonResponse({ code: 'invalid_key', message: 'Unrecognized key' }, 401));
     const error = await makeClient(fetchImpl).get('/x').catch((e: unknown) => e);
 
-    expect(error).toBeInstanceOf(ExampleHttpError);
-    expect((error as ExampleHttpError).status).toBe(401);
+    expect(error).toBeInstanceOf(BusinesscentralHttpError);
+    expect((error as BusinesscentralHttpError).status).toBe(401);
     expect((error as Error).message).toContain('HTTP 401');
-    expect((error as Error).message).toContain('EXAMPLE_API_KEY');
+    expect((error as Error).message).toContain('BC_API_KEY');
     expect((error as Error).message).not.toContain('Unrecognized key');
     expect((error as Error).message).not.toContain('invalid_key');
   });
@@ -136,8 +136,8 @@ describe('error handling', () => {
     const fetchImpl = makeFetch(() => new Response(html, { status: 502, headers: { 'content-type': 'text/html' } }));
     const error = (await makeClient(fetchImpl, { maxAttempts: 1 })
       .get('/x')
-      .catch((e: unknown) => e)) as ExampleHttpError;
-    expect(error.message).toBe('Example API request failed with HTTP 502');
+      .catch((e: unknown) => e)) as BusinesscentralHttpError;
+    expect(error.message).toBe('Businesscentral API request failed with HTTP 502');
   });
 
   it('reads at most 64 KB of an error body', async () => {
@@ -156,8 +156,8 @@ describe('error handling', () => {
     );
     const error = (await makeClient(fetchImpl)
       .get('/x')
-      .catch((e: unknown) => e)) as ExampleHttpError;
-    expect(error).toBeInstanceOf(ExampleHttpError);
+      .catch((e: unknown) => e)) as BusinesscentralHttpError;
+    expect(error).toBeInstanceOf(BusinesscentralHttpError);
     expect(pulled).toBeLessThan(10);
     expect(error.message.length).toBeLessThan(700);
   });
@@ -165,7 +165,7 @@ describe('error handling', () => {
   it('redacts the configured API key wherever it appears, before truncating', async () => {
     const apiKey = 'live-key-0123456789abcdef';
     const respond = (body: string, type = 'text/plain') =>
-      new ExampleClient({
+      new BusinesscentralClient({
         apiKey,
         baseUrl: BASE,
         fetchImpl: makeFetch(() => new Response(body, { status: 400, headers: { 'content-type': type } })),
@@ -173,23 +173,23 @@ describe('error handling', () => {
 
     const echoed = (await respond(`proxy error: ${apiKey} and ${encodeURIComponent(apiKey)}`)
       .get('/x')
-      .catch((e: unknown) => e)) as ExampleHttpError;
+      .catch((e: unknown) => e)) as BusinesscentralHttpError;
     expect(echoed.message).not.toContain(apiKey);
     expect(echoed.message).not.toContain('proxy error');
 
     const boundary = (await respond(`${'x'.repeat(490)}${apiKey}`)
       .get('/x')
-      .catch((e: unknown) => e)) as ExampleHttpError;
+      .catch((e: unknown) => e)) as BusinesscentralHttpError;
     expect(boundary.message).not.toContain(apiKey.slice(0, 6));
 
     const nested = (await respond(JSON.stringify({ message: 'bad', nested: { echo: apiKey } }), 'application/json')
       .get('/x')
-      .catch((e: unknown) => e)) as ExampleHttpError;
+      .catch((e: unknown) => e)) as BusinesscentralHttpError;
     expect(JSON.stringify(nested)).not.toContain(apiKey);
 
     expect(redactSecrets('X-API-KEY: abc123')).not.toContain('abc123');
     expect(redactSecrets('Authorization: Bearer abc123')).not.toContain('abc123');
-    expect(redactSecrets('EXAMPLE_API_KEY=abc123')).not.toContain('abc123');
+    expect(redactSecrets('BC_API_KEY=abc123')).not.toContain('abc123');
   });
 
   it('redacts the configured key header by name', () => {
@@ -219,7 +219,7 @@ describe('error handling', () => {
     const fetchImpl = makeFetch(() => jsonResponse({}, 400));
     const error = (await makeClient(fetchImpl)
       .get('/items', { cursor: 'secret-cursor' })
-      .catch((e: unknown) => e)) as ExampleHttpError;
+      .catch((e: unknown) => e)) as BusinesscentralHttpError;
     expect(error.url).toBe(`${BASE}/items`);
     expect(error.message).not.toContain('secret-cursor');
   });
@@ -237,13 +237,13 @@ describe('error handling', () => {
   it('names only the system error code of a network error, never its message', async () => {
     const fetchImpl = makeFetch(() => {
       throw new TypeError('fetch failed somewhere odd', {
-        cause: Object.assign(new Error('getaddrinfo ENOTFOUND api.vendor.test'), { code: 'ENOTFOUND' }),
+        cause: Object.assign(new Error('getaddrinfo ENOTFOUND api.businesscentral.dynamics.com'), { code: 'ENOTFOUND' }),
       });
     });
     const message = await makeClient(fetchImpl, { maxAttempts: 1 })
       .get('/x')
       .catch((e: Error) => e.message);
-    expect(message).toMatch(/Network error calling the Example API \(GET\) \(ENOTFOUND\)\./);
+    expect(message).toMatch(/Network error calling the Businesscentral API \(GET\) \(ENOTFOUND\)\./);
     expect(message).not.toMatch(/odd|getaddrinfo/);
   });
 
@@ -282,7 +282,7 @@ describe('redirects', () => {
       .get('/items')
       .catch((e: Error) => e.message);
     expect(message).toContain('redirect (HTTP 302) for GET');
-    expect(message).toContain('EXAMPLE_BASE_URL');
+    expect(message).toContain('BC_BASE_URL');
     // The Location is the vendor's text: never quoted.
     expect(message).not.toContain('other.vendor.test');
     await expect(makeClient(fetchImpl).post('/items', {})).rejects.toThrow(/redirect/);
@@ -318,9 +318,9 @@ describe('retries and concurrency', () => {
     const sleep = vi.fn(async (_ms: number) => undefined);
     const error = (await makeClient(fetchImpl, { sleep })
       .get('/x')
-      .catch((e: unknown) => e)) as ExampleHttpError;
+      .catch((e: unknown) => e)) as BusinesscentralHttpError;
 
-    expect(error).toBeInstanceOf(ExampleHttpError);
+    expect(error).toBeInstanceOf(BusinesscentralHttpError);
     expect(error.message).toContain('retry-after=3600s');
     expect(fetchImpl).toHaveBeenCalledTimes(1);
     expect(sleep).not.toHaveBeenCalled();
@@ -348,8 +348,8 @@ describe('retries and concurrency', () => {
   it('never retries POST or PATCH', async () => {
     const fetchImpl = makeFetch(() => jsonResponse({}, 503));
     const client = makeClient(fetchImpl);
-    await expect(client.post('/x', {})).rejects.toBeInstanceOf(ExampleHttpError);
-    await expect(client.patch('/x', {})).rejects.toBeInstanceOf(ExampleHttpError);
+    await expect(client.post('/x', {})).rejects.toBeInstanceOf(BusinesscentralHttpError);
+    await expect(client.patch('/x', {})).rejects.toBeInstanceOf(BusinesscentralHttpError);
     expect(fetchImpl).toHaveBeenCalledTimes(2);
 
     const failing = makeFetch(() => {
@@ -373,7 +373,7 @@ describe('retries and concurrency', () => {
     });
     const client = makeClient(fetchImpl, { maxConcurrency: 1 });
     await expect(client.get('/x')).rejects.toThrow('timed out');
-    await expect(client.get('/x')).rejects.toBeInstanceOf(ExampleHttpError);
+    await expect(client.get('/x')).rejects.toBeInstanceOf(BusinesscentralHttpError);
     await expect(client.get('/x')).resolves.toEqual({ ok: true });
   });
 
@@ -419,13 +419,13 @@ describe('against a local upstream (real sockets)', () => {
       }
       res.writeHead(302, { location: `${base}/items/1` }).end();
     });
-    const client = new ExampleClient({ apiKey: 'local-key-123456', baseUrl: base });
+    const client = new BusinesscentralClient({ apiKey: 'local-key-123456', baseUrl: base });
 
     await expect(client.get('/items/1')).resolves.toEqual({ id: '1' });
     await expect(client.get('/moved')).rejects.toThrow('redirects are not followed');
     expect(seen).toEqual([
-      { url: '/v1/items/1', key: 'local-key-123456' },
-      { url: '/v1/moved', key: 'local-key-123456' },
+      { url: '/v1/items/1', key: 'Bearer local-key-123456' },
+      { url: '/v1/moved', key: 'Bearer local-key-123456' },
     ]);
   });
 
@@ -433,7 +433,7 @@ describe('against a local upstream (real sockets)', () => {
     const base = await startUpstream(() => {
       // never answers
     });
-    const client = new ExampleClient({ apiKey: 'k', baseUrl: base, timeoutMs: 100, maxAttempts: 1 });
+    const client = new BusinesscentralClient({ apiKey: 'k', baseUrl: base, timeoutMs: 100, maxAttempts: 1 });
     await expect(client.get('/slow')).rejects.toThrow(/timed out after 100 ms/);
     upstream?.closeAllConnections();
   });
