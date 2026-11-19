@@ -51,14 +51,21 @@ export function withNextPage(result: unknown): unknown {
   } catch {
     token = null;
   }
-  return token && token.length <= 500 ? { ...rest, nextSkipToken: token } : rest;
+  if (!token || token.length > MAX_SKIP_TOKEN || !/^[\x21-\x7e]+$/.test(token)) {
+    // Never a silently shortened list: the next page exists, but cannot be given as a skip token.
+    throw new Error('Business Central has more results, but its next page cannot be passed on. Narrow the request with filter.');
+  }
+  return { ...rest, nextSkipToken: token };
 }
+
+/** The longest skip token passed on and taken back. */
+export const MAX_SKIP_TOKEN = 2000;
 
 /** The page size when `top` is not given. */
 export const DEFAULT_TOP = 50;
 
-export async function listCompanies(client: UpstreamClient): Promise<unknown> {
-  return nestedFailuresAsStatus(await client.get('/companies'));
+export async function listCompanies(client: UpstreamClient, input: { skipToken?: string } = {}): Promise<unknown> {
+  return withNextPage(nestedFailuresAsStatus(await client.get('/companies', { $skiptoken: input.skipToken })));
 }
 
 export async function listEntity(client: UpstreamClient, entity: Entity, input: ListInput): Promise<unknown> {

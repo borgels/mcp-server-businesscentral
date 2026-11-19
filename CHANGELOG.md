@@ -2,16 +2,20 @@
 
 ## 0.1.1 (Business Central)
 
-- The token is sent to `api.businesscentral.dynamics.com` exactly. Loopback,
-  subdomains, other ports and other hosts need `BC_ALLOW_CUSTOM_BASE_URL`
-  (standalone server only); a gateway never takes the override.
+- The token is sent to `https://api.businesscentral.dynamics.com` exactly,
+  on every surface. No loopback, subdomain, other port or other host, and no
+  override: `BC_ALLOW_CUSTOM_BASE_URL` and the `allowCustomBaseUrl` option are
+  gone.
 - The stdio and HTTP surfaces redact results like the gateway: the data is
   redacted before it is serialised, and a result or error that still holds a
   piece of the token is withheld.
-- Answers must be JSON objects. Another content type, unreadable JSON and a
-  root that is not an object are refused with fixed texts.
-- Server-driven paging: a list's `@odata.nextLink` becomes `nextSkipToken`,
-  and `skipToken` fetches the next page. The link itself is not passed on.
+- Answers must be non-empty JSON objects. An empty body, another content
+  type, unreadable JSON and a root that is not an object are refused with
+  fixed texts.
+- Server-driven paging, `list_companies` included: a list's
+  `@odata.nextLink` becomes `nextSkipToken`, and `skipToken` fetches the next
+  page. The link itself is not passed on, and a next page that cannot be
+  given as a skip token is an error, never a silently shorter list.
 - The HTTP transport logs only its own paths and an error's name, never a
   stack.
 - Audit fields: `companyId`, `customerId` and `invoiceId` in clear text;

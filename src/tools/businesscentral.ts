@@ -34,7 +34,7 @@ const listShape = {
     .string()
     .trim()
     .min(1)
-    .max(500)
+    .max(2000)
     .regex(/^[\x21-\x7e]+$/, 'Expected the nextSkipToken of the previous answer.')
     .optional()
     .describe('The nextSkipToken of the previous answer, for the next page when Business Central pages the list itself.'),
@@ -128,13 +128,13 @@ export const BC_TOOLS: ToolDefinition[] = [
   defineTool({
     name: 'businesscentral_list_companies',
     title: 'List companies (Business Central)',
-    description: 'The companies in this Business Central environment, with id, name and display name.',
-    inputShape: {},
+    description: 'The companies in this Business Central environment, with id, name and display name. skipToken fetches the next page when an answer has nextSkipToken.',
+    inputShape: { skipToken: listShape.skipToken },
     annotations: READ_TOOL_ANNOTATIONS,
     returnsUpstreamContent: true,
     summary: 'Fetched companies.',
     upstream: [{ access: 'read', method: 'GET', path: '/companies' }],
-    handler: async client => listCompanies(client),
+    handler: async (client, input) => listCompanies(client, input as { skipToken?: string }),
   }),
   listTool('customers', 'list_customers', 'List customers (Business Central)', 'Customers with number, name, contact details, balance and blocked status.'),
   defineTool({

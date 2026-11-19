@@ -89,9 +89,11 @@ describe('BusinesscentralClient', () => {
       expect(() => new BusinesscentralClient({ apiKey: 'k', baseUrl }), baseUrl).toThrow('must be https://api.businesscentral.dynamics.com');
     }
     expect(() => new BusinesscentralClient({ apiKey: 'k', baseUrl: 'https://api.businesscentral.dynamics.com/v2.0/t/Production/api/v2.0' })).not.toThrow();
-    // Loopback only with the explicit override (the standalone server's BC_ALLOW_CUSTOM_BASE_URL).
-    expect(() => new BusinesscentralClient({ apiKey: 'k', baseUrl: 'http://127.0.0.1:8080/api', allowCustomBaseUrl: true })).not.toThrow();
-    expect(() => new BusinesscentralClient({ apiKey: 'k', baseUrl: 'http://[::1]:8080/api', allowCustomBaseUrl: true })).not.toThrow();
+    // There is no override: not in the options, not in the environment.
+    process.env.BC_ALLOW_CUSTOM_BASE_URL = 'true';
+    expect(() => new BusinesscentralClient({ apiKey: 'k', baseUrl: 'http://127.0.0.1:8080/api', allowCustomBaseUrl: true } as never)).toThrow('must be https://api.businesscentral.dynamics.com');
+    expect(() => new BusinesscentralClient({ apiKey: 'k', baseUrl: 'https://sub.api.businesscentral.dynamics.com/api' })).toThrow('must be https://api.businesscentral.dynamics.com');
+    delete process.env.BC_ALLOW_CUSTOM_BASE_URL;
 
     for (const baseUrl of [
       'https://user:hunter2@api.businesscentral.dynamics.com/v1',
@@ -121,8 +123,6 @@ describe('BusinesscentralClient', () => {
     process.env.BC_MAX_RESPONSE_BYTES = '10MB';
     expect(() => new BusinesscentralClient({ apiKey: 'k' })).toThrow('BC_MAX_RESPONSE_BYTES');
     delete process.env.BC_MAX_RESPONSE_BYTES;
-    process.env.BC_ALLOW_CUSTOM_BASE_URL = 'perhaps';
-    expect(() => new BusinesscentralClient({ apiKey: 'k', baseUrl: BASE })).toThrow('BC_ALLOW_CUSTOM_BASE_URL');
 
     expect(() => new BusinesscentralClient({ apiKey: 'k', maxConcurrency: 0 })).toThrow('maxConcurrency');
     expect(() => new BusinesscentralClient({ apiKey: 'k', maxConcurrency: Number.NaN })).toThrow('maxConcurrency');
@@ -448,7 +448,8 @@ describe('against a local upstream (real sockets)', () => {
       }
       res.writeHead(302, { location: `${base}/items/1` }).end();
     });
-    const client = new BusinesscentralClient({ apiKey: 'local-key-123456', baseUrl: base, allowCustomBaseUrl: true });
+    // The client only talks to the API host; the test's fetch carries the request to the local socket instead.
+    const client = new BusinesscentralClient({ apiKey: 'local-key-123456', baseUrl: BASE, fetchImpl: toLocal(base) });
 
     await expect(client.get('/items/1')).resolves.toEqual({ id: '1' });
     await expect(client.get('/moved')).rejects.toThrow('redirects are not followed');
@@ -462,8 +463,14 @@ describe('against a local upstream (real sockets)', () => {
     const base = await startUpstream(() => {
       // never answers
     });
-    const client = new BusinesscentralClient({ apiKey: 'k', baseUrl: base, timeoutMs: 100, maxAttempts: 1, allowCustomBaseUrl: true });
+    const client = new BusinesscentralClient({ apiKey: 'k', baseUrl: BASE, timeoutMs: 100, maxAttempts: 1, fetchImpl: toLocal(base) });
     await expect(client.get('/slow')).rejects.toThrow(/timed out after 100 ms/);
     upstream?.closeAllConnections();
   });
 });
+
+/** A fetch that sends a request for the API host to a local socket instead (real sockets, the host check intact). */
+function toLocal(base: string): typeof fetch {
+  return ((input: string | URL | Request, init?: RequestInit) =>
+    fetch(String(input).replace(BASE, base), init)) as typeof fetch;
+}
