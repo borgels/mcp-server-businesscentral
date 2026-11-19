@@ -96,8 +96,8 @@ Configuration is read from the environment (see `.env.example`). Invalid numbers
 
 | Variable | Default | Description |
 |---|---|---|
-| `BC_API_KEY` | – | **Required.** API key. |
-| `BC_BASE_URL` | – | **Required.** Base URL of the API. Must be `https` (loopback `http` is allowed for local mocks). |
+| `BC_API_KEY` | – | **Required.** A bearer access token for Business Central from Microsoft Entra (see Authentication). |
+| `BC_BASE_URL` | – | **Required.** `https://api.businesscentral.dynamics.com/v2.0/<tenant id>/<environment>/api/v2.0`. Any other host, port, scheme or subdomain is refused; there is no override. |
 | `BC_TIMEOUT_MS` | `30000` | Timeout per request attempt. |
 | `BC_MAX_CONCURRENCY` | `4` | Maximum concurrent upstream requests. |
 | `BC_MAX_RESPONSE_BYTES` | `10485760` | Largest response body read (at most 100 MB). |

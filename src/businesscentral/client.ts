@@ -42,9 +42,8 @@ type HttpMethod = 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE';
 export const API_KEY_HEADER = 'Authorization';
 
 /**
- * Hosts the API key may be sent to (exact host or any subdomain), e.g.
- * ['api.vendor.com']. Empty: any https host. Loopback http is always allowed
- * for local mocks.
+ * The host the API key (a bearer token) may be sent to: exactly this host, over
+ * https on the default port. No subdomain, no loopback, no override.
  */
 export const UPSTREAM_HOST_SUFFIXES: readonly string[] = ['api.businesscentral.dynamics.com'];
 
@@ -535,4 +534,3 @@ function assertSafeBaseUrl(baseUrl: string): void {
   // The host is not quoted: it is a configuration value.
   throw new ConfigError(`Refusing to send the API key to that address: BC_BASE_URL must be https://${UPSTREAM_HOSTS.join(' or https://')}.`);
 }
-
