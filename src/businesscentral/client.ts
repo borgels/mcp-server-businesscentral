@@ -50,6 +50,9 @@ export const API_KEY_HEADER = 'Authorization';
  */
 export const UPSTREAM_HOST_SUFFIXES: readonly string[] = ['api.businesscentral.dynamics.com'];
 
+/** Business Central's API host. By default the key (a bearer token) goes to this exact host and no other. */
+export const UPSTREAM_HOSTS: readonly string[] = UPSTREAM_HOST_SUFFIXES;
+
 export const DEFAULT_MAX_RESPONSE_BYTES = 10 * 1024 * 1024;
 const MAX_RESPONSE_BYTES_LIMIT = 100 * 1024 * 1024;
 
@@ -491,15 +494,22 @@ async function readResponseBody(response: Response, maxBytes: number): Promise<u
   if (!text) {
     return null;
   }
-  const contentType = response.headers.get('content-type') ?? '';
-  if (!contentType.includes('application/json')) {
-    return text;
+  // Business Central's API answers JSON objects. Anything else (an HTML page from a proxy, a cut body, a bare value)
+  // is refused with a fixed text: it is not data, and its text is not ours to pass on.
+  const contentType = (response.headers.get('content-type') ?? '').toLowerCase();
+  if (!/^application\/(?:[a-z.+-]+\+)?json\b/.test(contentType.trim())) {
+    throw new Error('The Business Central API answered with something other than JSON.');
   }
+  let parsed: unknown;
   try {
-    return JSON.parse(text) as unknown;
+    parsed = JSON.parse(text) as unknown;
   } catch {
-    return text;
+    throw new Error('The Business Central API answered with JSON that could not be read.');
   }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('The Business Central API answered with JSON of an unexpected form.');
+  }
+  return parsed;
 }
 
 function trimTrailingSlash(value: string): string {
@@ -522,31 +532,28 @@ function assertSafeBaseUrl(baseUrl: string, allowCustomHost: boolean): void {
     throw new ConfigError('BC_BASE_URL must not contain credentials, a query string or a fragment.');
   }
 
+  // Without the explicit override: https to the exact API host, on the default port. No loopback, no subdomain.
+  if (!allowCustomHost) {
+    const host = parsed.hostname.toLowerCase();
+    if (parsed.protocol === 'https:' && parsed.port === '' && UPSTREAM_HOSTS.includes(host)) {
+      return;
+    }
+    // The host is not quoted: it is a configuration value.
+    throw new ConfigError(
+      `Refusing to send the API key to that address: BC_BASE_URL must be https://${UPSTREAM_HOSTS.join(' or https://')}. ` +
+        'Set BC_ALLOW_CUSTOM_BASE_URL=true (standalone server only) for a local mock.',
+    );
+  }
+
   if (isLocalHost(parsed.hostname) && (parsed.protocol === 'http:' || parsed.protocol === 'https:')) {
     return;
   }
-
   if (parsed.protocol !== 'https:') {
     throw new ConfigError(
       // The scheme is not quoted: it is part of a configuration value.
       'Refusing to send the API key over a scheme other than https://. Use https:// (loopback http:// is allowed for local mocks).',
     );
   }
-
-  const host = parsed.hostname.toLowerCase();
-  if (
-    UPSTREAM_HOST_SUFFIXES.length === 0 ||
-    allowCustomHost ||
-    UPSTREAM_HOST_SUFFIXES.some(suffix => host === suffix || host.endsWith(`.${suffix}`))
-  ) {
-    return;
-  }
-
-  // The host is not quoted: it is a configuration value.
-  throw new ConfigError(
-    `Refusing to send the API key to that host: BC_BASE_URL must be on ${UPSTREAM_HOST_SUFFIXES.join(', ')}. ` +
-      'Set BC_ALLOW_CUSTOM_BASE_URL=true to allow another host.',
-  );
 }
 
 function isLocalHost(hostname: string): boolean {

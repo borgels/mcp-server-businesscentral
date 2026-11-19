@@ -1,10 +1,10 @@
 # mcp-server-businesscentral
 
-A [Model Context Protocol](https://modelcontextprotocol.io) server for the Dynamics 365 Business Central API. It lets an MCP client (Claude or any other MCP-capable assistant) read data from the Dynamics 365 Business Central API and, when enabled, write to it.
+A [Model Context Protocol](https://modelcontextprotocol.io) server for the Dynamics 365 Business Central API. It lets an MCP client (Claude or any other MCP-capable assistant) read data from the Dynamics 365 Business Central API v2.0. It has no write tools.
 
-> This is an independent, unofficial project. It is not developed, endorsed or supported by &lt;Vendor&gt;.
+> This is an independent, unofficial project. It is not developed, endorsed or supported by Microsoft.
 
-- Read-only by default; writes are opt-in per instance.
+- Read-only: every tool makes one GET. There are no write tools, so `BC_ENABLE_WRITES` changes nothing.
 - One set of upstream credentials per server instance; the server does no per-user authorization itself (see [Security model](#security-model)).
 - Two transports: stdio for local clients, stateless streamable HTTP for containers and gateways.
 - Embeddable: the `./gateway` export exposes the same tools, validation, policy and audit to a host application.
@@ -98,7 +98,7 @@ Configuration is read from the environment (see `.env.example`). Invalid numbers
 |---|---|---|
 | `BC_API_KEY` | – | **Required.** API key. |
 | `BC_BASE_URL` | – | **Required.** Base URL of the API. Must be `https` (loopback `http` is allowed for local mocks). |
-| `BC_ALLOW_CUSTOM_BASE_URL` | `false` | Allow a base URL outside the hosts the server expects, when such a list is configured. |
+| `BC_ALLOW_CUSTOM_BASE_URL` | `false` | Standalone server only: allow a base URL other than `https://api.businesscentral.dynamics.com` (loopback for a local mock). Without it the token goes to that exact host only. A gateway never takes it. |
 | `BC_TIMEOUT_MS` | `30000` | Timeout per request attempt. |
 | `BC_MAX_CONCURRENCY` | `4` | Maximum concurrent upstream requests. |
 | `BC_MAX_RESPONSE_BYTES` | `10485760` | Largest response body read (at most 100 MB). |
@@ -132,9 +132,23 @@ A host application can run the tools in-process instead of over MCP:
 ```ts
 import { createBusinesscentralGateway, businesscentralToolCatalog } from 'mcp-server-businesscentral/gateway';
 
-const gateway = createBusinesscentralGateway({ apiKey: tenant.apiKey, baseUrl: tenant.baseUrl });
-const result = await gateway.callTool('get_item', { itemId: 'i1' }, { caller: 'user@businesscentral.test' });
+// One instance per call, with an access token the host has just fetched for the tenant.
+const gateway = createBusinesscentralGateway({
+  apiKey: await tokens.accessToken(tenantId),
+  baseUrl: `https://api.businesscentral.dynamics.com/v2.0/${tenantId}/Production/api/v2.0`,
+  policy: {},
+});
+const companies = await gateway.callTool('list_companies', {}, { caller: 'user-42' });
+const customers = await gateway.callTool('list_customers', { companyId, top: 50 }, { caller: 'user-42' });
 ```
+
+## Authentication (Microsoft Entra)
+
+Business Central's API takes a bearer access token from Microsoft Entra. This server does not fetch one: the key it is given (`apiKey`, or `BC_API_KEY`) *is* the access token, and the host is the token provider.
+
+- **The app.** Register a multitenant app in Microsoft Entra with the application permission **Dynamics 365 Business Central, `API.ReadWrite.All`** and a certificate. An administrator in the customer's tenant gives admin consent (`https://login.microsoftonline.com/organizations/v2.0/adminconsent?client_id=...&scope=https://api.businesscentral.dynamics.com/.default&redirect_uri=...`). In Business Central, a user with `SUPER` adds the app on the page **Microsoft Entra Applications** with state Enabled and the permission set **D365 READ**: that set, not the Entra permission's name, decides what the app can read. See Microsoft's [service-to-service guide](https://learn.microsoft.com/en-us/dynamics365/business-central/dev-itpro/administration/automation-apis-using-s2s-authentication).
+- **The token provider hook (gateway).** The host fetches an access token for the tenant with client credentials and its certificate (`https://login.microsoftonline.com/<tenant>/oauth2/v2.0/token`, scope `https://api.businesscentral.dynamics.com/.default`), caches it until shortly before it ends, and creates a gateway instance per call with the current token. Renewal is the host's: an instance never outlives the token it was given.
+- **Standalone server.** `BC_API_KEY` is a token fetched the same way. It lasts about an hour, and the process does not renew it: the standalone server is for trying the tools, not for running unattended.
 
 - **Explicit credentials.** `apiKey` and `baseUrl` are required; a missing value throws when the gateway is created. A gateway never reads `BC_API_KEY` or `BC_BASE_URL` from the environment, so one tenant cannot silently fall back to the process's credentials. The stdio and HTTP transports still read them from the environment.
 - **Several tenants in one process.** Create one gateway per set of credentials. Each instance redacts error text, tool results and audit records with its own key only; no secret is kept in a process-wide registry, and a dropped instance releases its key.
@@ -203,9 +217,9 @@ on as the API returned them.
 - **One shared identity.** Every caller acts with the rights of the configured API key. Give it the least rights that work and rotate it regularly.
 - **Per-user authorization belongs in front of the server.** The server checks a single bearer token and does not know the end user. For multi-user use, run it behind an identity-aware gateway that decides which users may call which tools, holds the bearer token, and is the only network path to the server. Hosts can also embed the tools through the `./gateway` module export and pass the caller identity into the audit log.
 - **Tool access is not data access.** A gateway controls who may call which tool; every permitted caller still sees everything the API key can see. To separate data, run several instances with different keys.
-- **Writes are off by default.** Write tools are annotated as destructive so clients can ask for confirmation. Read-only tools get a client that refuses non-GET requests. When `BC_AUDIT_LOG` is set, a write tool does not run unless its start record is written; without it there is no audit record.
+- **No writes.** Every tool is read-only and gets a client that refuses non-GET requests. The second fence is Business Central's own permission set on the app (D365 READ).
 - **Upstream content is untrusted input.** Data returned by the API may be written by anyone with access to it. Tool results label it as data; clients that combine this server with other tools should treat it accordingly.
-- **The API key stays on the API origin.** Redirects are never followed, the base URL must use `https`, and error messages and audit records are redacted (by each instance, with that instance's key) and size-capped. See the threat model above for what is and is not guaranteed.
+- **The token stays on the API host.** It is sent to `https://api.businesscentral.dynamics.com` exactly (no subdomain, port or loopback unless the standalone override is set; a gateway never takes it), redirects are never followed, answers must be JSON objects, results on every surface (gateway, stdio and HTTP) are redacted and withheld when they still hold a piece of the token, the HTTP transport logs only its own paths and no stacks, and error messages and audit records are redacted (by each instance, with that instance's key) and size-capped. See the threat model above for what is and is not guaranteed.
 - **The HTTP transport fails closed.** It refuses to start on a non-loopback address or with any origin allowed unless a token is set, compares tokens in constant time, throttles failed authentication per client address, checks `Origin` and `Host` (DNS rebinding), and caps request bodies.
 
 Report vulnerabilities as described in [SECURITY.md](SECURITY.md).

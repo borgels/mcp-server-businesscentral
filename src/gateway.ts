@@ -241,8 +241,8 @@ function buildGateway(options: BusinesscentralGatewayOptions, apiKey: string) {
     apiKey,
     baseUrl,
     credentialEnv: {},
-    // Under a host's policy nothing is read from the environment, this switch included.
-    ...(policy ? { allowCustomBaseUrl: clientOptions.allowCustomBaseUrl ?? false } : {}),
+    // Exact API host only: a gateway never takes the custom-host override, from the host or the environment.
+    allowCustomBaseUrl: false,
   });
   const redactor: SecretRedactor = client.redactor;
   // Every call in a scope of its own, with or without a host policy: a call made from inside another

@@ -33,6 +33,25 @@ export interface ListInput {
   top?: number;
   skip?: number;
   filter?: string;
+  skipToken?: string;
+}
+
+/**
+ * Business Central's server-driven paging: a list that does not fit in one answer carries `@odata.nextLink`. The link
+ * itself is not passed on (it repeats the tenant's address); its `$skiptoken` is, as `nextSkipToken`, for the next
+ * call's `skipToken`.
+ */
+export function withNextPage(result: unknown): unknown {
+  if (result === null || typeof result !== 'object' || Array.isArray(result)) return result;
+  const { ['@odata.nextLink']: next, ...rest } = result as Record<string, unknown>;
+  if (typeof next !== 'string') return result;
+  let token: string | null = null;
+  try {
+    token = new URL(next).searchParams.get('$skiptoken') ?? new URL(next).searchParams.get('%24skiptoken');
+  } catch {
+    token = null;
+  }
+  return token && token.length <= 500 ? { ...rest, nextSkipToken: token } : rest;
 }
 
 /** The page size when `top` is not given. */
@@ -44,12 +63,15 @@ export async function listCompanies(client: UpstreamClient): Promise<unknown> {
 
 export async function listEntity(client: UpstreamClient, entity: Entity, input: ListInput): Promise<unknown> {
   const path = `/companies(${guid(input.companyId, 'companyId')})/${entity}`;
-  return nestedFailuresAsStatus(
-    await client.get(path, {
-      $top: input.top ?? DEFAULT_TOP,
-      $skip: input.skip,
-      $filter: input.filter,
-    }),
+  return withNextPage(
+    nestedFailuresAsStatus(
+      await client.get(path, {
+        $top: input.top ?? DEFAULT_TOP,
+        $skip: input.skip,
+        $filter: input.filter,
+        $skiptoken: input.skipToken,
+      }),
+    ),
   );
 }
 

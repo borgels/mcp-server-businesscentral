@@ -7,13 +7,13 @@
     "url": "https://github.com/borgels/mcp-server-businesscentral",
     "source": "github"
   },
-  "version": "0.1.0",
+  "version": "0.1.1",
   "packages": [
     {
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "mcp-server-businesscentral",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "runtimeHint": "npx",
       "transport": {
         "type": "stdio"
@@ -29,11 +29,11 @@
           "name": "BC_BASE_URL",
           "description": "Base URL of the Dynamics 365 Business Central API.",
           "isRequired": true,
-          "placeholder": "https://api.vendor.test/v1"
+          "placeholder": "https://api.businesscentral.dynamics.com/v2.0/<tenant id>/Production/api/v2.0"
         },
         {
           "name": "BC_ENABLE_WRITES",
-          "description": "Enable the write tools.",
+          "description": "No effect: the server has no write tools.",
           "format": "boolean",
           "default": "false"
         },
