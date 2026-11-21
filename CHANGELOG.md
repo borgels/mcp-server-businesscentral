@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.2.0
+
+- Gateway error results carry failure metadata: when the upstream API
+  answered with an HTTP error, the result has `failure: { httpStatus,
+  requestId? }`, so a host can count failures by status without reading
+  their text. `requestId` is the vendor's own id from a response header
+  (`REQUEST_ID_HEADERS`, the vendor's documented header first), kept only
+  when it is a hex id of 8 to 64 characters (one run of hex digits,
+  or groups of four or more joined by single hyphens, as in a UUID) and does not hold the
+  shape of a personal number. It is checked again after redaction, so an id
+  that shared a piece with the key is dropped. Never the body, the vendor's
+  error code or message. The shared helpers are in `src/errors.ts`
+  (`vendorRequestId`, `requestIdFrom`, `failureMetadata`).
+- Business Central (a Microsoft API) answers with a `request-id` header; it is read first.
+
 ## 0.1.1 (Business Central)
 
 - The token is sent to `https://api.businesscentral.dynamics.com` exactly,
