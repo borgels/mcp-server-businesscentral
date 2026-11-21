@@ -1,5 +1,5 @@
 import { ConfigError, readEnvBoolean, readEnvInteger, readEnvString, type Env } from '../config-env.js';
-import { BusinesscentralHttpError, describeUrl, parseRetryAfterMs, requestIdFrom, SecretRedactor } from '../errors.js';
+import { BusinesscentralHttpError, describeUrl, parseRetryAfterMs, requestIdFrom, SecretRedactor, UpstreamRedirectError } from '../errors.js';
 import { USER_AGENT } from '../version.js';
 
 export interface BusinesscentralClientOptions {
@@ -228,7 +228,10 @@ export class BusinesscentralClient implements UpstreamClient {
     return this.execute(method, url, init, async response => {
       if (isRedirect(response.status)) {
         await discardBody(response);
-        throw new Error(this.redactor.redact(redirectRefusedMessage(response, method, url)));
+        throw new UpstreamRedirectError(this.redactor.redact(redirectRefusedMessage(response, method, url)), {
+          status: response.status,
+          requestId: requestIdFrom(response.headers),
+        });
       }
 
       if (!response.ok) {

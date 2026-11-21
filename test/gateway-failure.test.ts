@@ -1,7 +1,7 @@
 // Failure metadata on gateway error results: the upstream API's HTTP status and its request id (a UUID or hex id
 // only), for a host that counts failures without reading their text. Never the body, the vendor's code or message.
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { failureMetadata, BusinesscentralHttpError, REQUEST_ID_HEADERS, requestIdFrom, vendorRequestId } from '../src/errors.js';
+import { failureMetadata, BusinesscentralHttpError, REQUEST_ID_HEADERS, requestIdFrom, UpstreamRedirectError, vendorRequestId } from '../src/errors.js';
 import { createBusinesscentralGateway } from '../src/gateway.js';
 import { BASE } from './helpers.js';
 
@@ -81,6 +81,10 @@ describe('vendorRequestId', () => {
     expect(failureMetadata(new BusinesscentralHttpError({ status: 500, url: `${BASE}/items/1`, requestId: 'Jane Doe' }))).toEqual({
       httpStatus: 500,
     });
+    expect(failureMetadata(new UpstreamRedirectError('Refused.', { status: 302, requestId: UUID }))).toEqual({
+      httpStatus: 302,
+      requestId: UUID,
+    });
     expect(failureMetadata(new Error('boom'))).toBeUndefined();
     expect(failureMetadata('boom')).toBeUndefined();
   });
@@ -94,6 +98,16 @@ describe('gateway error results', () => {
     const serialised = JSON.stringify(result);
     expect(serialised).not.toContain('Jane Doe');
     expect(serialised).not.toContain('E_NOPE');
+  });
+
+  it('carry the status and the request id of a refused redirect, never its Location', async () => {
+    const result = await gatewayAnswering(302, {
+      [REQUEST_ID_HEADERS[0]!]: UUID,
+      location: 'https://elsewhere.example/Jane-Doe',
+    }).callTool(TOOL, INPUT);
+    expect(result.isError).toBe(true);
+    expect(result.failure).toEqual({ httpStatus: 302, requestId: UUID });
+    expect(JSON.stringify(result)).not.toContain('Jane-Doe');
   });
 
   it('carry the status alone when the request id is not in the form of one', async () => {

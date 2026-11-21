@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.1
+
+- A redirect the client refuses is an `UpstreamRedirectError` with the
+  status and request id, so its gateway error result carries `failure`
+  like an HTTP error. The message is unchanged; the Location is never
+  read into it.
+
 ## 0.2.0
 
 - Gateway error results carry failure metadata: when the upstream API
