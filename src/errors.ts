@@ -241,9 +241,30 @@ export interface FailureMetadata {
   requestId?: string;
 }
 
-/** The failure metadata of an error: an HTTP error from the upstream API gives its status and request id. */
+/**
+ * A redirect from the upstream API that the client refused to follow. The API answered with this 3xx status, so it
+ * is an HTTP failure of the vendor's and carries the status and request id like an HTTP error. The message is our own
+ * (never the Location, which is the vendor's text).
+ */
+export class UpstreamRedirectError extends Error {
+  readonly status: number;
+  /** The vendor's own id for the request, when a response header gives one as a UUID or hex id. */
+  readonly requestId?: string;
+
+  constructor(message: string, input: { status: number; requestId?: string }) {
+    super(message);
+    this.name = 'UpstreamRedirectError';
+    this.status = input.status;
+    this.requestId = vendorRequestId(input.requestId);
+  }
+}
+
+/**
+ * The failure metadata of an error: an HTTP error from the upstream API, or a redirect it answered with that was
+ * refused, gives its status and request id.
+ */
 export function failureMetadata(error: unknown): FailureMetadata | undefined {
-  if (!(error instanceof BusinesscentralHttpError)) return undefined;
+  if (!(error instanceof BusinesscentralHttpError) && !(error instanceof UpstreamRedirectError)) return undefined;
   const status = error.status;
   if (!Number.isInteger(status) || status < 100 || status > 599) return undefined;
   const requestId = vendorRequestId(error.requestId);

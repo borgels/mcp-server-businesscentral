@@ -217,6 +217,7 @@ export const FIXED_CORPUS: readonly string[] = [
   "UND_ERR_SOCKET",
   "Unauthorized",
   "Unsupported Businesscentral gateway tool: ",
+  "UpstreamRedirectError",
   "User-Agent",
   "Vendors with number, name, contact details and balance. No bank accounts.",
   "WARNING: MCP_HTTP_ALLOW_UNAUTHENTICATED=true and no MCP_HTTP_TOKEN: /mcp on ",
