@@ -102,6 +102,50 @@ describe('customers, vendors and items', () => {
   });
 });
 
+describe('a line that already carries the dimension (#23)', () => {
+  it('gives the line its own dimension the value, with the etag just read', async () => {
+    const { gw, seen } = host((method, url) => {
+      if (url === `${C}/purchaseInvoices`) return json({ id: DOC, number: 'K1', status: 'Draft' }, 201);
+      if (url.endsWith('/purchaseInvoiceLines')) return json({ id: LINE1 }, 201);
+      if (method === 'POST' && url.endsWith('/dimensionSetLines')) return json({ error: { code: 'x' } }, 400);
+      if (method === 'GET') return json({ id: DIM, valueCode: 'OLD', '@odata.etag': ETAG });
+      return json({ id: DIM, valueCode: 'SALG' });
+    });
+    const result = await gw.callTool('create_purchase_invoice', {
+      companyId: COMPANY,
+      vendorNumber: '20000',
+      lines: [{ lineType: 'Item', lineObjectNumber: '1896-S', quantity: 1, dimensions: [{ dimensionId: DIM, valueCode: 'SALG' }] }],
+    });
+    expect(result.isError).toBeFalsy();
+    expect((result.structuredContent as { incomplete?: boolean }).incomplete).toBeUndefined();
+    expect(calls(seen).slice(2)).toEqual([
+      `POST /companies(${COMPANY})/purchaseInvoiceLines(${LINE1})/dimensionSetLines`,
+      `GET /companies(${COMPANY})/purchaseInvoiceLines(${LINE1})/dimensionSetLines(${DIM})`,
+      `PATCH /companies(${COMPANY})/purchaseInvoiceLines(${LINE1})/dimensionSetLines(${DIM})`,
+    ]);
+    expect(seen[4]!.body).toEqual({ valueCode: 'SALG' });
+    expect(seen[4]!.headers['If-Match']).toBe(ETAG);
+  });
+
+  it('says the dimension failed when the line has no such dimension to update', async () => {
+    const { gw, seen } = host((method, url) => {
+      if (url === `${C}/purchaseInvoices`) return json({ id: DOC, status: 'Draft' }, 201);
+      if (url.endsWith('/purchaseInvoiceLines')) return json({ id: LINE1 }, 201);
+      if (method === 'POST') return json({}, 400);
+      return json({}, 404);
+    });
+    const result = await gw.callTool('create_purchase_invoice', {
+      companyId: COMPANY,
+      vendorNumber: '20000',
+      lines: [{ lineType: 'Item', lineObjectNumber: '1896-S', quantity: 1, dimensions: [{ dimensionId: DIM, valueCode: 'SALG' }] }],
+    });
+    const data = result.structuredContent as { incomplete?: boolean; failure?: { step: string; httpStatus?: number } };
+    expect(data.incomplete).toBe(true);
+    expect(data.failure).toMatchObject({ step: 'dimension', httpStatus: 400 });
+    expect(seen.some(s => s.method === 'PATCH')).toBe(false);
+  });
+});
+
 describe('sales documents', () => {
   it('creates the header, then each line, with a line dimension after its line', async () => {
     let line = 0;
@@ -123,7 +167,7 @@ describe('sales documents', () => {
     expect(calls(seen)).toEqual([
       `POST /companies(${COMPANY})/salesInvoices`,
       `POST /companies(${COMPANY})/salesInvoices(${DOC})/salesInvoiceLines`,
-      `POST /companies(${COMPANY})/salesInvoices(${DOC})/salesInvoiceLines(${LINE1})/dimensionSetLines`,
+      `POST /companies(${COMPANY})/salesInvoiceLines(${LINE1})/dimensionSetLines`,
       `POST /companies(${COMPANY})/salesInvoices(${DOC})/salesInvoiceLines`,
     ]);
     expect(seen[0]!.body).toEqual({ customerNumber: '10000', invoiceDate: '2026-11-22' });

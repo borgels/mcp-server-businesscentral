@@ -437,7 +437,9 @@ function salesCreate(kind: SalesKind, dates: z.ZodRawShape, dateFields: readonly
     upstream: [
       { access: 'write', method: 'POST', path: `/companies({companyId})/${document.entity}` },
       { access: 'write', method: 'POST', path: `/companies({companyId})/${document.entity}({documentId})/${document.lines}` },
-      { access: 'write', method: 'POST', path: `/companies({companyId})/${document.entity}({documentId})/${document.lines}({lineId})/dimensionSetLines` },
+      { access: 'write', method: 'POST', path: `/companies({companyId})/${document.lines}({lineId})/dimensionSetLines` },
+      { access: 'read', method: 'GET', path: `/companies({companyId})/${document.lines}({lineId})/dimensionSetLines({dimensionId})` },
+      { access: 'write', method: 'PATCH', path: `/companies({companyId})/${document.lines}({lineId})/dimensionSetLines({dimensionId})` },
     ],
     handler: async (client, input) => {
       const values = input as Record<string, unknown>;
@@ -584,7 +586,9 @@ const CHANGES: ToolDefinition[] = [
     upstream: [
       { access: 'write', method: 'POST', path: '/companies({companyId})/purchaseInvoices' },
       { access: 'write', method: 'POST', path: '/companies({companyId})/purchaseInvoices({documentId})/purchaseInvoiceLines' },
-      { access: 'write', method: 'POST', path: '/companies({companyId})/purchaseInvoices({documentId})/purchaseInvoiceLines({lineId})/dimensionSetLines' },
+      { access: 'write', method: 'POST', path: '/companies({companyId})/purchaseInvoiceLines({lineId})/dimensionSetLines' },
+      { access: 'read', method: 'GET', path: '/companies({companyId})/purchaseInvoiceLines({lineId})/dimensionSetLines({dimensionId})' },
+      { access: 'write', method: 'PATCH', path: '/companies({companyId})/purchaseInvoiceLines({lineId})/dimensionSetLines({dimensionId})' },
     ],
     handler: async (client, input) => {
       const values = input as Record<string, unknown>;
@@ -625,6 +629,8 @@ const CHANGES: ToolDefinition[] = [
     upstream: [
       { access: 'write', method: 'POST', path: '/companies({companyId})/journals({journalId})/journalLines' },
       { access: 'write', method: 'POST', path: '/companies({companyId})/journalLines({lineId})/dimensionSetLines' },
+      { access: 'read', method: 'GET', path: '/companies({companyId})/journalLines({lineId})/dimensionSetLines({dimensionId})' },
+      { access: 'write', method: 'PATCH', path: '/companies({companyId})/journalLines({lineId})/dimensionSetLines({dimensionId})' },
     ],
     handler: async (client, input) =>
       addJournalLines(client, input.companyId as string, input.journalId as string, input.lines as LineInput[], JOURNAL_LINE_FIELDS),
