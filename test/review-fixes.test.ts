@@ -96,7 +96,7 @@ describe('every tool', () => {
   const inputs: Record<string, { input: Record<string, unknown>; path: string; expand?: string }> = {
     list_companies: { input: {}, path: '/companies' },
     list_customers: { input: { companyId: COMPANY }, path: `/companies(${COMPANY})/customers` },
-    get_customer: { input: { companyId: COMPANY, customerId: ID }, path: `/companies(${COMPANY})/customers(${ID})`, expand: 'customerFinancialDetails' },
+    get_customer: { input: { companyId: COMPANY, customerId: ID }, path: `/companies(${COMPANY})/customers(${ID})`, expand: 'customerFinancialDetail' },
     list_vendors: { input: { companyId: COMPANY }, path: `/companies(${COMPANY})/vendors` },
     list_items: { input: { companyId: COMPANY }, path: `/companies(${COMPANY})/items` },
     list_sales_invoices: { input: { companyId: COMPANY }, path: `/companies(${COMPANY})/salesInvoices` },

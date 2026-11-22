@@ -159,7 +159,7 @@ const BASE_READS: ToolDefinition[] = [
     returnsUpstreamContent: true,
     summary: 'Fetched customer.',
     upstream: [{ access: 'read', method: 'GET', path: '/companies({companyId})/customers({customerId})' }],
-    handler: async (client, input) => getEntity(client, 'customers', input.companyId as string, input.customerId as string, 'customerFinancialDetails'),
+    handler: async (client, input) => getEntity(client, 'customers', input.companyId as string, input.customerId as string, 'customerFinancialDetail'),
   }),
   listTool('vendors', 'list_vendors', 'List vendors (Business Central)', 'Vendors with number, name, contact details and balance. No bank accounts.'),
   listTool('items', 'list_items', 'List items (Business Central)', 'Items with number, description, type, unit price, unit cost and inventory.'),
