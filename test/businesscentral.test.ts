@@ -130,7 +130,7 @@ describe('requests', () => {
     await gw.callTool('get_customer', { companyId: COMPANY, customerId: CUSTOMER });
     await gw.callTool('get_sales_invoice', { companyId: COMPANY, invoiceId: CUSTOMER });
     expect(seen[0]!.url.pathname.endsWith(`/companies(${COMPANY})/customers(${CUSTOMER})`)).toBe(true);
-    expect(seen[0]!.url.searchParams.get('$expand')).toBe('customerFinancialDetails');
+    expect(seen[0]!.url.searchParams.get('$expand')).toBe('customerFinancialDetail');
     expect(seen[1]!.url.searchParams.get('$expand')).toBe('salesInvoiceLines');
   });
 

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.1
+
+- `get_customer` expands `customerFinancialDetail`, the customer's navigation
+  property in API v2.0 (singular). With `customerFinancialDetails` Business
+  Central answered 400 (#19).
+
 ## 0.4.0
 
 - Change tools for everyday sales and bookkeeping work, on only with writes

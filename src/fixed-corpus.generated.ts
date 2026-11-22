@@ -507,7 +507,7 @@ export const FIXED_CORPUS: readonly string[] = [
   "credentialEnv",
   "currencyCode",
   "customer",
-  "customerFinancialDetails",
+  "customerFinancialDetail",
   "customerId",
   "customerPaymentJournals",
   "customerPayments",
