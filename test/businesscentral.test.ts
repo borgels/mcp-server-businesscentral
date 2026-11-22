@@ -39,29 +39,74 @@ const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 
 describe('the tool table', () => {
-  it('only reads, names a fixed entity per tool, and has no broad tool', () => {
-    expect(BC_TOOLS.every(tool => tool.annotations.readOnlyHint === true)).toBe(true);
-    expect(businesscentralToolCatalog.map(entry => entry.name).sort()).toEqual(
+  it('has fixed reads and non-destructive changes, and no broad tool', () => {
+    const reads = businesscentralToolCatalog.filter(entry => entry.riskLevel === 'read').map(entry => entry.name);
+    const changes = businesscentralToolCatalog.filter(entry => entry.riskLevel !== 'read').map(entry => entry.name);
+    expect(reads.sort()).toEqual(
       [
         'get_customer',
+        'get_purchase_invoice',
         'get_sales_invoice',
+        'get_sales_order',
+        'get_sales_quote',
         'list_accounts',
         'list_companies',
+        'list_customer_payment_journals',
+        'list_customer_payments',
         'list_customers',
+        'list_dimensions',
         'list_general_ledger_entries',
         'list_items',
+        'list_journal_lines',
+        'list_journals',
         'list_purchase_invoices',
         'list_sales_invoices',
+        'list_sales_orders',
+        'list_sales_quotes',
         'list_vendors',
       ].sort(),
     );
+    expect(changes.sort()).toEqual(
+      [
+        'add_journal_lines',
+        'attach_document',
+        'create_customer',
+        'create_item',
+        'create_purchase_invoice',
+        'create_sales_invoice',
+        'create_sales_order',
+        'create_sales_quote',
+        'create_vendor',
+        'delete_purchase_invoice_draft',
+        'delete_sales_draft',
+        'post_journal',
+        'post_purchase_invoice',
+        'post_sales_invoice',
+        'register_customer_payment',
+        'send_sales_invoice',
+        'update_customer',
+        'update_item',
+        'update_vendor',
+      ].sort(),
+    );
     for (const entry of businesscentralToolCatalog) {
-      expect(entry.riskLevel, entry.name).toBe('read');
       expect(entry.broad, entry.name).toBe(false);
-      expect(
-        entry.upstream.every(op => op.access === 'read' && op.method === 'GET'),
-        entry.name,
-      ).toBe(true);
+      expect(entry.riskLevel, entry.name).not.toBe('destructive');
+      if (entry.riskLevel === 'read') {
+        expect(
+          entry.upstream.every(op => op.access === 'read' && op.method === 'GET'),
+          entry.name,
+        ).toBe(true);
+        expect(entry.enabledByDefault, entry.name).toBe(true);
+      } else {
+        expect(entry.riskLevel, entry.name).toBe('write');
+        expect(entry.enabledByDefault, entry.name).toBe(false);
+        expect(entry.upstream.some(op => op.access === 'write'), entry.name).toBe(true);
+      }
+      // Never the chart of accounts, bank accounts, users, permissions or settings.
+      for (const op of entry.upstream) {
+        if (op.access === 'write') expect(op.path, entry.name).not.toMatch(/accounts\(|bankAccount|users|permission|setup|companyInformation/i);
+      }
     }
     expect(businesscentralGatewayTools.length).toBe(BC_TOOLS.length);
   });
@@ -138,10 +183,14 @@ describe('the token', () => {
 });
 
 describe('MCP server', () => {
-  it('registers every tool as read-only', async () => {
+  it('registers every tool, reads as read-only and changes as non-destructive writes', async () => {
     const { mcpClient } = await connect();
     const { tools } = await mcpClient.listTools();
     expect(tools.map(tool => tool.name).sort()).toEqual(BC_TOOLS.map(tool => tool.name).sort());
-    for (const tool of tools) expect(tool.annotations?.readOnlyHint, tool.name).toBe(true);
+    for (const tool of tools) {
+      const read = /^businesscentral_(list|get)_/.test(tool.name);
+      expect(tool.annotations?.readOnlyHint, tool.name).toBe(read);
+      expect(tool.annotations?.destructiveHint, tool.name).toBe(false);
+    }
   });
 });

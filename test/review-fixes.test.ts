@@ -104,10 +104,28 @@ describe('every tool', () => {
     list_purchase_invoices: { input: { companyId: COMPANY }, path: `/companies(${COMPANY})/purchaseInvoices` },
     list_accounts: { input: { companyId: COMPANY }, path: `/companies(${COMPANY})/accounts` },
     list_general_ledger_entries: { input: { companyId: COMPANY }, path: `/companies(${COMPANY})/generalLedgerEntries` },
+    list_sales_quotes: { input: { companyId: COMPANY }, path: `/companies(${COMPANY})/salesQuotes` },
+    get_sales_quote: { input: { companyId: COMPANY, documentId: ID }, path: `/companies(${COMPANY})/salesQuotes(${ID})`, expand: 'salesQuoteLines' },
+    list_sales_orders: { input: { companyId: COMPANY }, path: `/companies(${COMPANY})/salesOrders` },
+    get_sales_order: { input: { companyId: COMPANY, documentId: ID }, path: `/companies(${COMPANY})/salesOrders(${ID})`, expand: 'salesOrderLines' },
+    get_purchase_invoice: {
+      input: { companyId: COMPANY, documentId: ID },
+      path: `/companies(${COMPANY})/purchaseInvoices(${ID})`,
+      expand: 'purchaseInvoiceLines',
+    },
+    list_journals: { input: { companyId: COMPANY }, path: `/companies(${COMPANY})/journals` },
+    list_journal_lines: { input: { companyId: COMPANY, journalId: ID }, path: `/companies(${COMPANY})/journals(${ID})/journalLines` },
+    list_dimensions: { input: { companyId: COMPANY }, path: `/companies(${COMPANY})/dimensions`, expand: 'dimensionValues' },
+    list_customer_payment_journals: { input: { companyId: COMPANY }, path: `/companies(${COMPANY})/customerPaymentJournals` },
+    list_customer_payments: {
+      input: { companyId: COMPANY, journalId: ID },
+      path: `/companies(${COMPANY})/customerPaymentJournals(${ID})/customerPayments`,
+    },
   };
 
-  it('covers the whole table', () => {
-    expect(Object.keys(inputs).sort()).toEqual(BC_TOOLS.map(tool => tool.name.replace(/^businesscentral_/, '')).sort());
+  it('covers every read in the table (the changes are in writes.test.ts)', () => {
+    const reads = BC_TOOLS.filter(tool => tool.annotations.readOnlyHint).map(tool => tool.name.replace(/^businesscentral_/, ''));
+    expect(Object.keys(inputs).sort()).toEqual(reads.sort());
   });
 
   for (const [name, { input, path, expand }] of Object.entries(inputs)) {
