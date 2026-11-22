@@ -1,6 +1,6 @@
 {
   "name": "mcp-server-businesscentral",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "mcpName": "io.github.borgels/mcp-server-businesscentral",
   "description": "Unofficial MCP server for the Dynamics 365 Business Central API v2.0: reads, and opt-in changes for everyday sales and bookkeeping work.",
   "type": "module",

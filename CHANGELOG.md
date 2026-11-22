@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.2
+
+- A dimension on a sales or purchase document line is posted under its
+  document (`{documents}({documentId})/{lines}({lineId})/dimensionSetLines`).
+  On the top-level lines entity Business Central answered 400 (#21). Journal
+  lines keep `journalLines({lineId})/dimensionSetLines`, which Business Central
+  takes. Both seen against a real sandbox.
+
 ## 0.4.1
 
 - `get_customer` expands `customerFinancialDetail`, the customer's navigation
