@@ -18,6 +18,17 @@ export const WRITE_TOOL_ANNOTATIONS = {
 } as const;
 
 /**
+ * Changes that create, update, post or send a record, or delete a draft that never had effect outside Business
+ * Central. None deletes or overwrites history, so none is destructive; none is idempotent (a repeat makes another).
+ */
+export const CHANGE_TOOL_ANNOTATIONS = {
+  readOnlyHint: false,
+  destructiveHint: false,
+  idempotentHint: false,
+  openWorldHint: true,
+} as const;
+
+/**
  * Appended to the description of tools that return upstream content, which
  * may be written by third parties and can contain anything.
  */

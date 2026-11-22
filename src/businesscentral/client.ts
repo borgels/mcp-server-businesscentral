@@ -103,7 +103,12 @@ const TRANSIENT_NETWORK_CODES = new Set([
 export interface UpstreamClient {
   get<T>(path: string, query?: Record<string, QueryValue>): Promise<T>;
   post<T>(path: string, body?: unknown, query?: Record<string, QueryValue>): Promise<T>;
-  patch<T>(path: string, body?: unknown): Promise<T>;
+  /** PATCH with a JSON body. `etag` goes in If-Match ('*' when absent: Business Central requires the header). */
+  patch<T>(path: string, body?: unknown, etag?: string): Promise<T>;
+  /** PATCH with a binary body (application/octet-stream), e.g. a document attachment's content. */
+  patchBinary<T>(path: string, bytes: Uint8Array, etag?: string): Promise<T>;
+  /** DELETE with If-Match: the etag of the record as just read. */
+  delete<T>(path: string, etag: string): Promise<T>;
 }
 
 /**
@@ -119,6 +124,8 @@ export function readOnlyClient(client: UpstreamClient, toolName: string): Upstre
     get: (path, query) => client.get(path, query),
     post: refuse('POST'),
     patch: refuse('PATCH'),
+    patchBinary: refuse('PATCH'),
+    delete: refuse('DELETE'),
   };
 }
 
@@ -184,8 +191,16 @@ export class BusinesscentralClient implements UpstreamClient {
     return this.request<T>('POST', this.buildUrl(path, query), body);
   }
 
-  async patch<T>(path: string, body?: unknown): Promise<T> {
-    return this.request<T>('PATCH', this.buildUrl(path), body);
+  async patch<T>(path: string, body?: unknown, etag?: string): Promise<T> {
+    return this.request<T>('PATCH', this.buildUrl(path), body, { 'If-Match': ifMatch(etag) });
+  }
+
+  async patchBinary<T>(path: string, bytes: Uint8Array, etag?: string): Promise<T> {
+    return this.request<T>('PATCH', this.buildUrl(path), undefined, { 'If-Match': ifMatch(etag) }, bytes);
+  }
+
+  async delete<T>(path: string, etag: string): Promise<T> {
+    return this.request<T>('DELETE', this.buildUrl(path), undefined, { 'If-Match': ifMatch(etag) });
   }
 
   buildUrl(path: string, query?: Record<string, QueryValue>): string {
@@ -217,10 +232,19 @@ export class BusinesscentralClient implements UpstreamClient {
     };
   }
 
-  private async request<T>(method: HttpMethod, url: string, body?: unknown): Promise<T> {
-    const headers = this.headers();
+  private async request<T>(
+    method: HttpMethod,
+    url: string,
+    body?: unknown,
+    extraHeaders: Record<string, string> = {},
+    bytes?: Uint8Array,
+  ): Promise<T> {
+    const headers = { ...this.headers(), ...extraHeaders };
     const init: RequestInit = { method, headers };
-    if (body !== undefined) {
+    if (bytes !== undefined) {
+      headers['Content-Type'] = 'application/octet-stream';
+      init.body = bytes;
+    } else if (body !== undefined) {
       headers['Content-Type'] = 'application/json';
       init.body = JSON.stringify(body);
     }
@@ -245,6 +269,12 @@ export class BusinesscentralClient implements UpstreamClient {
         });
       }
 
+      // A change may answer 204 No Content (a bound action such as Microsoft.NAV.post, a DELETE, an attachment's
+      // content): that is success with no data.
+      if (method !== 'GET' && (response.status === 204 || response.headers.get('content-length') === '0')) {
+        await discardBody(response);
+        return null as T;
+      }
       return (await readResponseBody(response, this.maxResponseBytes)) as T;
     });
   }
@@ -508,6 +538,15 @@ async function readResponseBody(response: Response, maxBytes: number): Promise<u
     throw new Error('The Business Central API answered with JSON of an unexpected form.');
   }
   return parsed;
+}
+
+/** An If-Match value: Business Central's weak etag as read, or '*'. Anything else (a line break, a control) is refused. */
+export function ifMatch(etag: string | undefined): string {
+  if (etag === undefined || etag === '') return '*';
+  if (etag.length > 500 || !/^[ -~]+$/.test(etag)) {
+    throw new Error('Business Central gave a record version that cannot be sent back.');
+  }
+  return etag;
 }
 
 function trimTrailingSlash(value: string): string {

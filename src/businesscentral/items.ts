@@ -26,7 +26,17 @@ export type Entity =
   | 'salesInvoices'
   | 'purchaseInvoices'
   | 'accounts'
-  | 'generalLedgerEntries';
+  | 'generalLedgerEntries'
+  | 'salesQuotes'
+  | 'salesOrders'
+  | 'journals'
+  | 'dimensions'
+  | 'customerPaymentJournals';
+
+/** Entities read below one parent record: a journal's lines, a payment journal's payments. Fixed. */
+export type NestedEntity =
+  | { parent: 'journals'; child: 'journalLines' }
+  | { parent: 'customerPaymentJournals'; child: 'customerPayments' };
 
 export interface ListInput {
   companyId: string;
@@ -68,8 +78,23 @@ export async function listCompanies(client: UpstreamClient, input: { skipToken?:
   return withNextPage(nestedFailuresAsStatus(await client.get('/companies', { $skiptoken: input.skipToken })));
 }
 
-export async function listEntity(client: UpstreamClient, entity: Entity, input: ListInput): Promise<unknown> {
+export async function listEntity(client: UpstreamClient, entity: Entity, input: ListInput, expand?: string): Promise<unknown> {
   const path = `/companies(${guid(input.companyId, 'companyId')})/${entity}`;
+  return listPath(client, path, input, expand);
+}
+
+/** A list below one parent record (a journal's lines), with the same paging and filter. */
+export async function listNested(
+  client: UpstreamClient,
+  nested: NestedEntity,
+  parentId: string,
+  input: ListInput,
+): Promise<unknown> {
+  const path = `/companies(${guid(input.companyId, 'companyId')})/${nested.parent}(${guid(parentId, 'journalId')})/${nested.child}`;
+  return listPath(client, path, input);
+}
+
+async function listPath(client: UpstreamClient, path: string, input: ListInput, expand?: string): Promise<unknown> {
   return withNextPage(
     nestedFailuresAsStatus(
       await client.get(path, {
@@ -77,6 +102,7 @@ export async function listEntity(client: UpstreamClient, entity: Entity, input: 
         $skip: input.skip,
         $filter: input.filter,
         $skiptoken: input.skipToken,
+        $expand: expand,
       }),
     ),
   );
@@ -84,7 +110,7 @@ export async function listEntity(client: UpstreamClient, entity: Entity, input: 
 
 export async function getEntity(
   client: UpstreamClient,
-  entity: 'customers' | 'salesInvoices',
+  entity: 'customers' | 'salesInvoices' | 'salesQuotes' | 'salesOrders' | 'purchaseInvoices',
   companyId: string,
   id: string,
   expand?: string,

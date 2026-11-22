@@ -1,10 +1,10 @@
 # mcp-server-businesscentral
 
-A [Model Context Protocol](https://modelcontextprotocol.io) server for the Dynamics 365 Business Central API. It lets an MCP client (Claude or any other MCP-capable assistant) read data from the Dynamics 365 Business Central API v2.0. It has no write tools.
+A [Model Context Protocol](https://modelcontextprotocol.io) server for the Dynamics 365 Business Central API. It lets an MCP client (Claude or any other MCP-capable assistant) read data from the Dynamics 365 Business Central API v2.0 and, when writes are turned on, do everyday sales and bookkeeping work: customers, vendors and items, quotes, orders and invoices as drafts, posting, journals, customer payments, dimensions and attachments.
 
 > This is an independent, unofficial project. It is not developed, endorsed or supported by Microsoft.
 
-- Read-only: every tool makes one GET. There are no write tools, so `BC_ENABLE_WRITES` changes nothing.
+- Reads by default. The change tools run only with `BC_ENABLE_WRITES=true` (or `policy.enableWrites` in the gateway). None of them touches the chart of accounts, bank accounts, users, permission sets or settings, none moves money, and the only delete is of a document whose status was read as Draft right before.
 - One set of upstream credentials per server instance; the server does no per-user authorization itself (see [Security model](#security-model)).
 - Two transports: stdio for local clients, stateless streamable HTTP for containers and gateways.
 - Embeddable: the `./gateway` export exposes the same tools, validation, policy and audit to a host application.
@@ -23,8 +23,32 @@ A [Model Context Protocol](https://modelcontextprotocol.io) server for the Dynam
 | `businesscentral_list_purchase_invoices` | Purchase invoices. |
 | `businesscentral_list_accounts` | The chart of accounts. |
 | `businesscentral_list_general_ledger_entries` | Posted general ledger entries. |
+| `businesscentral_list_sales_quotes` / `get_sales_quote` | Sales quotes; one with its lines. |
+| `businesscentral_list_sales_orders` / `get_sales_order` | Sales orders; one with its lines. |
+| `businesscentral_get_purchase_invoice` | One purchase invoice with its lines. |
+| `businesscentral_list_journals` / `list_journal_lines` | General journal batches and their unposted lines. |
+| `businesscentral_list_dimensions` | Dimensions with their values. |
+| `businesscentral_list_customer_payment_journals` / `list_customer_payments` | Customer payment journals and their unposted payments. |
 
-Every tool reads. `BC_API_KEY` is a bearer access token for the tenant from Microsoft Entra (client credentials, `https://api.businesscentral.dynamics.com/.default`), and `BC_BASE_URL` is `https://api.businesscentral.dynamics.com/v2.0/<tenant id>/<environment>/api/v2.0`. The app must be set up in Business Central on the page Microsoft Entra Applications, with the permission set D365 READ.
+Changes (writes on only):
+
+| Tool | Purpose |
+|---|---|
+| `businesscentral_create_customer` / `update_customer` | A customer, without bank details. |
+| `businesscentral_create_vendor` / `update_vendor` | A vendor, without bank accounts. |
+| `businesscentral_create_item` / `update_item` | An item. |
+| `businesscentral_create_sales_quote` / `create_sales_order` / `create_sales_invoice` | A draft with its lines and line dimensions. A failed line is reported with what was created. |
+| `businesscentral_delete_sales_draft` | Delete a quote, order or invoice in status Draft (read right before, deleted with that read's etag). |
+| `businesscentral_post_sales_invoice` | Post a draft sales invoice (`Microsoft.NAV.post`). |
+| `businesscentral_send_sales_invoice` | E-mail a posted invoice (`Microsoft.NAV.send`); a draft is refused. |
+| `businesscentral_create_purchase_invoice` / `post_purchase_invoice` / `delete_purchase_invoice_draft` | A draft purchase invoice, posting it, deleting a draft. Nothing is paid. |
+| `businesscentral_add_journal_lines` / `post_journal` | Lines in a general journal batch, and posting the batch. |
+| `businesscentral_register_customer_payment` | A payment line in a customer payment journal, applied to an invoice. Not posted; moves no money. |
+| `businesscentral_attach_document` | Attach a file (base64, at most 5 MB) to a sales document, a purchase invoice or a journal. |
+
+Refusals start with `Refused:` (`Refused: only a draft can be deleted.`, `Refused: only a posted invoice can be sent.`, `Refused: give either an id or a number for the customer.`, `Refused: nothing to change.`, `Refused: the file content is not valid base64 or is too large.`).
+
+`BC_API_KEY` is a bearer access token for the tenant from Microsoft Entra (client credentials, `https://api.businesscentral.dynamics.com/.default`), and `BC_BASE_URL` is `https://api.businesscentral.dynamics.com/v2.0/<tenant id>/<environment>/api/v2.0`. The app must be set up in Business Central on the page Microsoft Entra Applications, with a permission set: D365 READ for reads only, D365 BUS FULL ACCESS for the changes. Microsoft does not allow SUPER for an app.
 
 ## Quick start
 
@@ -106,7 +130,7 @@ Configuration is read from the environment (see `.env.example`). Invalid numbers
 
 | Variable | Default | Description |
 |---|---|---|
-| `BC_ENABLE_WRITES` | `false` | No effect: the server has no write tools. |
+| `BC_ENABLE_WRITES` | `false` | Allow the change tools. Off, they are refused before anything is sent. |
 | `BC_DISABLED_TOOLS` | – | Comma-separated tool names to disable, with or without the `businesscentral_` prefix. |
 | `BC_AUDIT_LOG` | – | Path of a JSONL audit log: one record per tool call start, finish and error, with ids in clear text, free text hashed, duration, status and the caller passed by an embedding host. Write tools refuse to run if the log cannot be written. |
 
@@ -145,7 +169,7 @@ const customers = await gateway.callTool('list_customers', { companyId, top: 50 
 
 Business Central's API takes a bearer access token from Microsoft Entra. This server does not fetch one: the key it is given (`apiKey`, or `BC_API_KEY`) *is* the access token, and the host is the token provider.
 
-- **The app.** Register a multitenant app in Microsoft Entra with the application permission **Dynamics 365 Business Central, `API.ReadWrite.All`** and a certificate. An administrator in the customer's tenant gives admin consent (`https://login.microsoftonline.com/organizations/v2.0/adminconsent?client_id=...&scope=https://api.businesscentral.dynamics.com/.default&redirect_uri=...`). In Business Central, a user with `SUPER` adds the app on the page **Microsoft Entra Applications** with state Enabled and the permission set **D365 READ**: that set, not the Entra permission's name, decides what the app can read. See Microsoft's [service-to-service guide](https://learn.microsoft.com/en-us/dynamics365/business-central/dev-itpro/administration/automation-apis-using-s2s-authentication).
+- **The app.** Register a multitenant app in Microsoft Entra with the application permission **Dynamics 365 Business Central, `API.ReadWrite.All`** and a certificate. An administrator in the customer's tenant gives admin consent (`https://login.microsoftonline.com/organizations/v2.0/adminconsent?client_id=...&scope=https://api.businesscentral.dynamics.com/.default&redirect_uri=...`). In Business Central, an administrator who may manage permissions adds the app on the page **Microsoft Entra Applications** with state Enabled and a permission set: **D365 READ** for reads, **D365 BUS FULL ACCESS** for the changes (an app cannot be given SUPER). That set, not the Entra permission's name, decides what the app can do. See Microsoft's [service-to-service guide](https://learn.microsoft.com/en-us/dynamics365/business-central/dev-itpro/administration/automation-apis-using-s2s-authentication).
 - **The token provider hook (gateway).** The host fetches an access token for the tenant with client credentials and its certificate (`https://login.microsoftonline.com/<tenant>/oauth2/v2.0/token`, scope `https://api.businesscentral.dynamics.com/.default`), caches it until shortly before it ends, and creates a gateway instance per call with the current token. Renewal is the host's: an instance never outlives the token it was given.
 - **Standalone server.** `BC_API_KEY` is a token fetched the same way. It lasts about an hour, and the process does not renew it: the standalone server is for trying the tools, not for running unattended.
 
@@ -216,7 +240,7 @@ that still holds a piece of the key is withheld.
 - **One shared identity.** Every caller acts with the rights of the configured API key. Give it the least rights that work and rotate it regularly.
 - **Per-user authorization belongs in front of the server.** The server checks a single bearer token and does not know the end user. For multi-user use, run it behind an identity-aware gateway that decides which users may call which tools, holds the bearer token, and is the only network path to the server. Hosts can also embed the tools through the `./gateway` module export and pass the caller identity into the audit log.
 - **Tool access is not data access.** A gateway controls who may call which tool; every permitted caller still sees everything the API key can see. To separate data, run several instances with different keys.
-- **No writes.** Every tool is read-only and gets a client that refuses non-GET requests. The second fence is Business Central's own permission set on the app (D365 READ).
+- **Changes are opt-in and narrow.** Read tools get a client that refuses anything but GET. Change tools run only when writes are on, write their audit start record first (fail closed), are never retried, and have no tool for the chart of accounts, bank accounts, users, permission sets, settings or moving money. A delete reads the document's status first and deletes only a Draft, with that read's etag in If-Match. The second fence is Business Central's own permission set on the app.
 - **Upstream content is untrusted input.** Data returned by the API may be written by anyone with access to it. Tool results label it as data; clients that combine this server with other tools should treat it accordingly.
 - **The token stays on the API host.** It is sent to `https://api.businesscentral.dynamics.com` exactly (no subdomain, other port or loopback, on every surface; there is no override), redirects are never followed, answers must be JSON objects, results on every surface (gateway, stdio and HTTP) are redacted and withheld when they still hold a piece of the token, the HTTP transport logs only its own paths and no stacks, and error messages and audit records are redacted (by each instance, with that instance's key) and size-capped. See the threat model above for what is and is not guaranteed.
 - **The HTTP transport fails closed.** It refuses to start on a non-loopback address or with any origin allowed unless a token is set, compares tokens in constant time, throttles failed authentication per client address, checks `Origin` and `Host` (DNS rebinding), and caps request bodies.

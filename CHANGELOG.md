@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.4.0
+
+- Change tools for everyday sales and bookkeeping work, on only with writes
+  enabled (#17, #8): create and update customers, vendors and items (no bank
+  fields); sales quotes, orders and invoices and purchase invoices as drafts
+  with lines and line dimensions; post and send a sales invoice; post a
+  purchase invoice; delete a sales or purchase draft (status read as Draft
+  right before, deleted with that read's etag); add lines to a general journal
+  and post it; register a customer payment in a payment journal (not posted,
+  moves no money); attach a file to a document or journal. All are `write` in
+  the gateway catalog, none `destructive`.
+- Reads that support them: sales quotes and orders, a purchase invoice with
+  lines, journals and journal lines, dimensions with values, customer payment
+  journals and their payments.
+- The client sends If-Match on PATCH and DELETE, can send a binary body, and
+  takes 204 No Content as success for a change. The read-only client view
+  refuses every method but GET.
+
 ## 0.3.1
 
 - Licensor and copyright holder corrected to Borgels Services ApS in `LICENSE`,
