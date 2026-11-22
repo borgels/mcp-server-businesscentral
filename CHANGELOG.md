@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.3
+
+- A line dimension goes to the documented path again
+  (`{lines}({lineId})/dimensionSetLines`), for document and journal lines.
+- When Business Central refuses the create with 400 or 409 because the line
+  already carries the dimension (a default dimension of the item, customer or
+  vendor), the line's own dimension is read and patched with its etag (#23).
+  Without one to update, the failure is reported as before.
+
 ## 0.4.2
 
 - A dimension on a sales or purchase document line is posted under its
