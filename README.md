@@ -41,7 +41,7 @@ Changes (writes on only):
 | `businesscentral_delete_sales_draft` | Delete a quote, order or invoice in status Draft (read right before, deleted with that read's etag). |
 | `businesscentral_post_sales_invoice` | Post a draft sales invoice (`Microsoft.NAV.post`). |
 | `businesscentral_send_sales_invoice` | E-mail a posted invoice (`Microsoft.NAV.send`); a draft is refused. |
-| `businesscentral_create_purchase_invoice` / `post_purchase_invoice` / `delete_purchase_invoice_draft` | A draft purchase invoice, posting it, deleting a draft. Nothing is paid. |
+| `businesscentral_create_purchase_invoice` / `post_purchase_invoice` / `delete_purchase_invoice_draft` | A draft purchase invoice (cost per line as `unitCost`), posting it, deleting a draft. Nothing is paid. |
 | `businesscentral_add_journal_lines` / `post_journal` | Lines in a general journal batch, and posting the batch. |
 | `businesscentral_register_customer_payment` | A payment line in a customer payment journal, applied to an invoice. Not posted; moves no money. |
 | `businesscentral_attach_document` | Attach a file (base64, at most 5 MB) to a sales document, a purchase invoice or a journal. |

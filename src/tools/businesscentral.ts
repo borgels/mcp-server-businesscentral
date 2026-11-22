@@ -299,8 +299,9 @@ const lineShape = {
   dimensions: dimensionsSchema,
 };
 const salesLineSchema = z.strictObject({ ...lineShape, unitPrice: money('Unit price.').optional() });
-const PURCHASE_LINE_FIELDS = ['lineType', 'itemId', 'accountId', 'lineObjectNumber', 'description', 'quantity', 'directUnitCost', 'discountPercent'] as const;
-const purchaseLineSchema = z.strictObject({ ...lineShape, directUnitCost: money('Direct unit cost, excluding VAT.').optional() });
+/** Business Central's purchase invoice line takes the cost per unit as unitCost (API v2.0 purchaseInvoiceLine). */
+const PURCHASE_LINE_FIELDS = ['lineType', 'itemId', 'accountId', 'lineObjectNumber', 'description', 'quantity', 'unitCost', 'discountPercent'] as const;
+const purchaseLineSchema = z.strictObject({ ...lineShape, unitCost: money('Cost per unit, excluding VAT.').optional() });
 const JOURNAL_LINE_FIELDS = [
   'accountType',
   'accountId',

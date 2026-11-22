@@ -189,8 +189,9 @@ export async function deleteDraft(client: UpstreamClient, companyId: string, ent
   if (current.status !== 'Draft') {
     throw new Error(`${REFUSED_NOT_DRAFT} This document has status ${statusWord(current.status)}.`);
   }
-  const etag = typeof current['@odata.etag'] === 'string' ? (current['@odata.etag'] as string) : undefined;
-  if (etag === undefined) throw new Error(`${REFUSED_NOT_DRAFT} Business Central gave no record version to delete.`);
+  // The read's own version, never a wildcard: a document that changed since the read is not deleted.
+  const etag = typeof current['@odata.etag'] === 'string' ? (current['@odata.etag'] as string).trim() : '';
+  if (etag === '' || etag === '*') throw new Error(`${REFUSED_NOT_DRAFT} Business Central gave no record version to delete.`);
   await client.delete(path, etag);
   return { deleted: true, id: current.id, number: current.number };
 }

@@ -188,6 +188,26 @@ describe('sales documents', () => {
     }
   });
 
+  it('refuses to delete a draft without a record version of its own', async () => {
+    for (const etag of [undefined, '', '  ', '*']) {
+      const { gw, seen } = host(() => json({ id: DOC, status: 'Draft', ...(etag === undefined ? {} : { '@odata.etag': etag }) }));
+      const result = await gw.callTool('delete_sales_draft', { companyId: COMPANY, documentType: 'quote', documentId: DOC });
+      expect(result.isError, String(etag)).toBe(true);
+      expect(text(result)).toContain(REFUSED_NOT_DRAFT);
+      expect(seen.every(s => s.method === 'GET'), String(etag)).toBe(true);
+    }
+  });
+
+  it('reports a draft that changed since the read (HTTP 412) as an error', async () => {
+    const { gw, seen } = host(method =>
+      method === 'GET' ? json({ id: DOC, status: 'Draft', '@odata.etag': ETAG }) : json({}, 412),
+    );
+    const result = await gw.callTool('delete_sales_draft', { companyId: COMPANY, documentType: 'invoice', documentId: DOC });
+    expect(result.isError).toBe(true);
+    expect(text(result)).toContain('HTTP 412');
+    expect(seen).toHaveLength(2);
+  });
+
   it('posts an invoice with the bound action and reads it back', async () => {
     const { gw, seen } = host(method => (method === 'POST' ? empty() : json({ id: DOC, number: '103001', status: 'Open' })));
     const result = await gw.callTool('post_sales_invoice', { companyId: COMPANY, invoiceId: DOC });
@@ -227,7 +247,7 @@ describe('purchase invoices', () => {
       companyId: COMPANY,
       vendorNumber: '20000',
       vendorInvoiceNumber: 'F-77',
-      lines: [{ lineType: 'Account', lineObjectNumber: '6100', quantity: 1, directUnitCost: 500 }],
+      lines: [{ lineType: 'Account', lineObjectNumber: '6100', quantity: 1, unitCost: 500 }],
     });
     expect(result.isError).toBeFalsy();
     expect(calls(seen)).toEqual([
@@ -235,7 +255,7 @@ describe('purchase invoices', () => {
       `POST /companies(${COMPANY})/purchaseInvoices(${DOC})/purchaseInvoiceLines`,
     ]);
     expect(seen[0]!.body).toEqual({ vendorNumber: '20000', vendorInvoiceNumber: 'F-77' });
-    expect(seen[1]!.body).toEqual({ lineType: 'Account', lineObjectNumber: '6100', quantity: 1, directUnitCost: 500 });
+    expect(seen[1]!.body).toEqual({ lineType: 'Account', lineObjectNumber: '6100', quantity: 1, unitCost: 500 });
   });
 
   it('posts and deletes a draft only', async () => {
@@ -351,6 +371,42 @@ describe('errors', () => {
     const { gw, seen } = host(() => new Response('{}', { status: 503, headers: { 'content-type': 'application/json' } }));
     await gw.callTool('post_journal', { companyId: COMPANY, journalId: JOURNAL });
     expect(seen).toHaveLength(1);
+  });
+});
+
+describe('the audit and the policy per instance', () => {
+  it('refuses a change when the audit start record is not accepted, and sends nothing', async () => {
+    const seen: string[] = [];
+    const gw = createBusinesscentralGateway({
+      apiKey: TOKEN,
+      baseUrl: BASE,
+      policy: {
+        enableWrites: true,
+        audit: record => {
+          if (record.action === 'start') throw new Error('audit store down');
+        },
+      },
+      fetchImpl: (async (input: string | URL | Request) => {
+        seen.push(String(input));
+        return json({ id: DOC }, 201);
+      }) as typeof fetch,
+    });
+    const result = await gw.callTool('create_customer', { companyId: COMPANY, displayName: 'Demo' });
+    expect(result.isError).toBe(true);
+    expect(seen).toHaveLength(0);
+  });
+
+  it('keeps each instance to its own write policy when calls run at the same time', async () => {
+    const on = host(() => json({ id: DOC }, 201), true);
+    const off = host(() => json({ id: DOC }, 201), false);
+    const [a, b] = await Promise.all([
+      on.gw.callTool('create_customer', { companyId: COMPANY, displayName: 'A' }),
+      off.gw.callTool('create_customer', { companyId: COMPANY, displayName: 'B' }),
+    ]);
+    expect(a.isError).toBeFalsy();
+    expect(b.isError).toBe(true);
+    expect(on.seen).toHaveLength(1);
+    expect(off.seen).toHaveLength(0);
   });
 });
 
