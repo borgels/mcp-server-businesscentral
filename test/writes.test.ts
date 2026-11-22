@@ -123,7 +123,7 @@ describe('sales documents', () => {
     expect(calls(seen)).toEqual([
       `POST /companies(${COMPANY})/salesInvoices`,
       `POST /companies(${COMPANY})/salesInvoices(${DOC})/salesInvoiceLines`,
-      `POST /companies(${COMPANY})/salesInvoiceLines(${LINE1})/dimensionSetLines`,
+      `POST /companies(${COMPANY})/salesInvoices(${DOC})/salesInvoiceLines(${LINE1})/dimensionSetLines`,
       `POST /companies(${COMPANY})/salesInvoices(${DOC})/salesInvoiceLines`,
     ]);
     expect(seen[0]!.body).toEqual({ customerNumber: '10000', invoiceDate: '2026-11-22' });

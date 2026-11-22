@@ -437,7 +437,7 @@ function salesCreate(kind: SalesKind, dates: z.ZodRawShape, dateFields: readonly
     upstream: [
       { access: 'write', method: 'POST', path: `/companies({companyId})/${document.entity}` },
       { access: 'write', method: 'POST', path: `/companies({companyId})/${document.entity}({documentId})/${document.lines}` },
-      { access: 'write', method: 'POST', path: `/companies({companyId})/${document.lines}({lineId})/dimensionSetLines` },
+      { access: 'write', method: 'POST', path: `/companies({companyId})/${document.entity}({documentId})/${document.lines}({lineId})/dimensionSetLines` },
     ],
     handler: async (client, input) => {
       const values = input as Record<string, unknown>;
@@ -584,7 +584,7 @@ const CHANGES: ToolDefinition[] = [
     upstream: [
       { access: 'write', method: 'POST', path: '/companies({companyId})/purchaseInvoices' },
       { access: 'write', method: 'POST', path: '/companies({companyId})/purchaseInvoices({documentId})/purchaseInvoiceLines' },
-      { access: 'write', method: 'POST', path: '/companies({companyId})/purchaseInvoiceLines({lineId})/dimensionSetLines' },
+      { access: 'write', method: 'POST', path: '/companies({companyId})/purchaseInvoices({documentId})/purchaseInvoiceLines({lineId})/dimensionSetLines' },
     ],
     handler: async (client, input) => {
       const values = input as Record<string, unknown>;

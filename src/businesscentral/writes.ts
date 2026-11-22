@@ -96,18 +96,19 @@ export async function updateRecord(
   return nestedFailuresAsStatus(await client.patch(`${company(companyId)}/${entity}(${guid(id, 'id')})`, body));
 }
 
-/** Set dimensions on one line, one request each. Returns the failure of the first one that fails, if any. */
+/**
+ * Set dimensions on one line, one request each, under `base` (the path the line's dimensionSetLines hang under).
+ * Returns the failure of the first one that fails, if any.
+ */
 async function setDimensions(
   client: UpstreamClient,
-  companyId: string,
-  linesEntity: string,
-  lineId: string,
+  base: string,
   dimensions: DimensionInput[] | undefined,
 ): Promise<{ set: number; failed?: unknown }> {
   let set = 0;
   for (const dimension of dimensions ?? []) {
     try {
-      await client.post(`${company(companyId)}/${linesEntity}(${guid(lineId, 'lineId')})/dimensionSetLines`, {
+      await client.post(`${base}/dimensionSetLines`, {
         id: guid(dimension.dimensionId, 'dimensionId'),
         valueCode: dimension.valueCode,
       });
@@ -130,6 +131,7 @@ async function createLines(
   linesEntity: string,
   lines: LineInput[],
   fields: readonly string[],
+  dimensionsUnderParent: boolean,
 ): Promise<{ lines: unknown[]; failure?: Json }> {
   const made: unknown[] = [];
   for (const [index, line] of lines.entries()) {
@@ -144,7 +146,11 @@ async function createLines(
       if (typeof created.id !== 'string') {
         return { lines: made, failure: failure('dimension', index + 1, undefined) };
       }
-      const dims = await setDimensions(client, companyId, linesEntity, created.id, line.dimensions);
+      // A document line's dimensions hang under its document (Business Central answers 400 on the top-level lines entity,
+      // #21); a journal line's under the company's journalLines, which Business Central takes.
+      const lineId = guid(created.id, 'lineId');
+      const base = dimensionsUnderParent ? `${parentPath}/${linesEntity}(${lineId})` : `${company(companyId)}/${linesEntity}(${lineId})`;
+      const dims = await setDimensions(client, base, line.dimensions);
       if (dims.failed !== undefined) return { lines: made, failure: failure('dimension', index + 1, dims.failed) };
     }
   }
@@ -165,7 +171,7 @@ export async function createDocument(
     return { document: nestedFailuresAsStatus(created), lines: [], incomplete: true, failure: failure('line', 1, undefined) };
   }
   const parentPath = `${company(companyId)}/${document.entity}(${guid(created.id, 'documentId')})`;
-  const result = await createLines(client, companyId, parentPath, document.lines, lines, lineFields);
+  const result = await createLines(client, companyId, parentPath, document.lines, lines, lineFields, true);
   return {
     document: nestedFailuresAsStatus(created),
     lines: result.lines,
@@ -239,7 +245,7 @@ export async function addJournalLines(
   fields: readonly string[],
 ): Promise<unknown> {
   const parentPath = `${company(companyId)}/journals(${guid(journalId, 'journalId')})`;
-  const result = await createLines(client, companyId, parentPath, 'journalLines', lines, fields);
+  const result = await createLines(client, companyId, parentPath, 'journalLines', lines, fields, false);
   return { journalId, lines: result.lines, ...(result.failure ? { incomplete: true, failure: result.failure } : {}) };
 }
 
